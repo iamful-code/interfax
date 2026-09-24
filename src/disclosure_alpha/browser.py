@@ -53,6 +53,10 @@ class BrowserUnavailable(RuntimeError):
     """Playwright или браузер не установлены."""
 
 
+class CaptchaRequired(RuntimeError):
+    """Сайт показал капчу, а окно браузера скрыто -- пройти её некому."""
+
+
 class _HeaderShim:
     """Минимальная замена requests.Session для совместимости (используется только .headers)."""
 
@@ -117,6 +121,8 @@ class BrowserTransport:
         locale: str = "ru-RU",
         user_agent: Optional[str] = None,
         stub_detector: Optional[Callable[[str], bool]] = None,
+        captcha_detector: Optional[Callable[[str], bool]] = None,
+        captcha_timeout_sec: float = 300.0,
         warmup_timeout_sec: float = DEFAULT_WARMUP_TIMEOUT_SEC,
         navigate_for_get: bool = True,
         settle_ms: int = 1500,
@@ -132,6 +138,8 @@ class BrowserTransport:
         self.locale = locale
         self.user_agent = user_agent
         self.stub_detector = stub_detector or (lambda _html: False)
+        self.captcha_detector = captcha_detector or (lambda _html: False)
+        self.captcha_timeout_sec = captcha_timeout_sec
         self.warmup_timeout_sec = warmup_timeout_sec
         # GET выполняем настоящей навигацией: защита отличает переход по ссылке от программного запроса
         self.navigate_for_get = navigate_for_get
@@ -234,9 +242,20 @@ class BrowserTransport:
         except Exception as exc:  # noqa: BLE001 -- проверка может увести страницу прямо во время перехода
             if not _is_navigation_error(exc):
                 raise
+        announced_captcha = False
         while time.time() < deadline:
             html = self._safe_content()
-            if html is not None and not self.stub_detector(html):
+            if html is not None and self.captcha_detector(html):
+                if self.headless:
+                    raise CaptchaRequired(
+                        "сайт показывает капчу. Запустите команду с видимым окном (--show-browser), пройдите капчу "
+                        "в нём -- профиль сохранится в каталоге браузера, и дальше команды пойдут без неё")
+                if not announced_captcha:
+                    announced_captcha = True
+                    deadline = max(deadline, time.time() + self.captcha_timeout_sec)
+                    log.warning("сайт показывает капчу: пройдите её в открывшемся окне браузера, "
+                                "команда продолжит сама (ожидание до %.0f с)", self.captcha_timeout_sec)
+            elif html is not None and not self.stub_detector(html):
                 html = self._settle(html)
                 self.cookies_loaded = len(self._context.cookies())
                 log.info("проверка браузера пройдена, cookies: %d", self.cookies_loaded)
@@ -328,11 +347,20 @@ class BrowserTransport:
         """Ждёт, пока страница перестанет быть заглушкой проверки (она перезагружает себя сама)."""
         deadline = deadline or (time.time() + self.warmup_timeout_sec)
         html = ""
+        announced_captcha = False
         while time.time() < deadline:
             current = self._safe_content()
             if current is not None:
                 html = current
-                if not self.stub_detector(html):
+                if self.captcha_detector(html):
+                    if self.headless:
+                        raise CaptchaRequired(
+                            "сайт показывает капчу. Запустите команду с видимым окном (--show-browser) и пройдите её")
+                    if not announced_captcha:
+                        announced_captcha = True
+                        deadline = max(deadline, time.time() + self.captcha_timeout_sec)
+                        log.warning("капча: пройдите её в окне браузера, команда продолжит сама")
+                elif not self.stub_detector(html):
                     return html
             try:
                 self._page.wait_for_timeout(500)

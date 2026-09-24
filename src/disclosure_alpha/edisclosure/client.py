@@ -66,6 +66,7 @@ class EDisclosureClient:
                 headless=self.settings.browser_headless,
                 user_data_dir=self.settings.browser_profile_dir,
                 stub_detector=is_protection_stub,
+                captcha_detector=is_captcha_page,
                 warmup_timeout_sec=self.settings.browser_warmup_timeout_sec,
                 navigate_for_get=self.settings.browser_navigate_get,
                 settle_ms=self.settings.browser_settle_ms,
@@ -134,15 +135,29 @@ class EDisclosureClient:
         try:
             res = self.http.get(url, params=params, use_cache=False)
             (out_dir / f"{name}.html").write_text(res.text, "utf-8")
-            if is_protection_stub(res.text):
+            kind = classify_page(res.text)
+            if kind == "captcha":
+                return None, {"status": "капча (нужно пройти вручную)", "http_status": res.status, "url": res.url,
+                              "captcha": True, "stub": True, "saved_file": str(out_dir / f"{name}.html"),
+                              "dom": parsers.describe_dom(res.text),
+                              "diagnosis": "сайт показывает капчу Servicepipe. Запустите команду с видимым окном "
+                                           "(--show-browser), пройдите капчу в нём -- профиль браузера сохранится "
+                                           "в data/browser_profile, дальше команды пойдут без неё"}
+            if kind == "stub":
                 return None, {"status": "заглушка антибот-защиты (HTTP 200, но контента нет)",
                               "http_status": res.status, "url": res.url, "stub": True,
                               "saved_file": str(out_dir / f"{name}.html"),
+                              "dom": parsers.describe_dom(res.text),
                               "diagnosis": "JS-проверка браузера (Servicepipe): страница отдаёт спиннер и скрипт, "
-                                           "который выставляет cookies spjs/spsc/spid. Нужны cookies из браузера -- "
-                                           "см. docs/windows_quickstart.md, раздел «Cookies браузера»"}
+                                           "который выставляет cookies spjs/spsc/spid. Проще всего пройти её "
+                                           "режимом --browser (см. docs/windows_quickstart.md)"}
             return res.text, {"status": "ok", "http_status": res.status, "url": res.url}
-        except HttpError as e:
+        except Exception as e:  # noqa: BLE001 -- диагностика: любая ошибка должна попасть в отчёт
+            if type(e).__name__ == "CaptchaRequired":
+                return None, {"status": "капча (нужно пройти вручную)", "url": url, "captcha": True, "stub": True,
+                              "diagnosis": str(e)}
+            if not isinstance(e, HttpError):
+                raise
             info: dict = {"status": f"error: HTTP {e.status}", "http_status": e.status, "url": url}
             if e.body:
                 (out_dir / f"{name}_error.html").write_text(e.body, "utf-8")
@@ -231,6 +246,11 @@ class EDisclosureClient:
             summary["hints"].insert(0, "в config/cookies.txt остались шаблонные значения ("
                                     + ", ".join(summary["placeholder_cookies"])
                                     + "): подставьте настоящие из браузера или используйте режим --browser")
+        if any(p.get("captcha") for p in summary["pages"].values()):
+            summary["hints"].insert(0, "показана капча: запустите ту же команду с --show-browser и пройдите её "
+                                       "в открывшемся окне (один раз, профиль сохранится в data/browser_profile)"
+                                    if self.settings.browser_headless else
+                                    "капча не пройдена: пройдите её в открытом окне браузера, команда продолжит сама")
         if any(p.get("stub") for p in summary["pages"].values()) and not self.is_browser:
             summary["hints"].append("проверку браузера можно проходить автоматически: "
                                     "pip install playwright && playwright install chromium, затем disclosure-alpha discover --browser")
@@ -391,12 +411,35 @@ def alternate_host(base_url: str) -> str:
 _STUB_MARKERS = ("id_captcha_frame_div", "spinner-container", "id_spinner", "__sp_init", "spsc=")
 
 
+# Страница капчи Servicepipe: подключает свои скрипты и требует ручного прохождения
+# Внимание: контейнер id_captcha_frame_div есть и на обычной странице JS-проверки (скрытый),
+# поэтому признаком капчи считаем только подключение её скриптов и явный флаг is_captcha.
+_CAPTCHA_MARKERS = ("sp_rotated_captcha", "captchaintgen", '"is_captcha":true', '"is_captcha": true')
+
+
+def is_captcha_page(html: str) -> bool:
+    """True, если вместо страницы сайта показана капча (нужно пройти вручную в видимом окне)."""
+    if not html:
+        return False
+    head = html[:60_000].lower()
+    return any(m in head for m in _CAPTCHA_MARKERS)
+
+
+def classify_page(html: str) -> str:
+    """content -- настоящая страница; captcha -- требуется ручное прохождение; stub -- JS-проверка."""
+    if is_captcha_page(html):
+        return "captcha"
+    if is_protection_stub(html):
+        return "stub"
+    return "content"
+
+
 def is_protection_stub(html: str) -> bool:
     """True, если вместо страницы сайта пришла заглушка проверки браузера."""
     if not html:
         return False
     head = html[:40_000].lower()
-    if any(m.lower() in head for m in _STUB_MARKERS):
+    if any(m.lower() in head for m in _STUB_MARKERS) or is_captcha_page(html):
         return True
     no_links = "<a " not in html.lower()
     js_redirect = 'http-equiv="refresh"' in head and "<noscript>" in head

@@ -26,6 +26,8 @@ def _ed_client(args, settings):
     use_browser = bool(getattr(args, "browser", False) or getattr(args, "show_browser", False)) or None
     if getattr(args, "show_browser", False):
         settings.browser_headless = False
+        # в видимом окне капчу проходит человек -- ждём дольше
+        settings.browser_warmup_timeout_sec = max(settings.browser_warmup_timeout_sec, 300.0)
     return EDisclosureClient(settings, use_browser=use_browser)
 
 
@@ -255,7 +257,14 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
-    args.func(args)
+    try:
+        args.func(args)
+    except Exception as exc:  # noqa: BLE001
+        if type(exc).__name__ == "CaptchaRequired":
+            print(f"\nСайт показал капчу: {exc}\n"
+                  f"Команда: {' '.join(['disclosure-alpha', args.cmd, '--show-browser'])}", file=sys.stderr)
+            return 2
+        raise
     return 0
 
 

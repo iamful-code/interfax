@@ -219,3 +219,68 @@ def test_navigation_captures_js_rendered_content(transport, server):
     spec = parse_search_form(res.text, base)
     assert spec is not None and "dateStart" in spec.fields
     assert "eventTypeCheckboxGroup" in spec.checkbox_groups
+
+
+CAPTCHA_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
+<script src="./sp_rotated_captcha/js/captchaIntGen.js"></script>
+<script src="./sp_rotated_captcha/js/bundle.js"></script></head><body><div id="captcha"></div></body></html>"""
+
+
+class _ScriptedPage:
+    """Страница, отдающая заранее заданную последовательность HTML."""
+
+    def __init__(self, pages):
+        self.pages = list(pages)
+        self.reads = 0
+
+    def wait_for_load_state(self, *a, **kw):
+        return None
+
+    def wait_for_timeout(self, *a, **kw):
+        return None
+
+    def content(self):
+        self.reads += 1
+        return self.pages[min(self.reads - 1, len(self.pages) - 1)]
+
+
+class _FakeContext:
+    def cookies(self):
+        return [{"name": "spsc"}, {"name": "spid"}]
+
+
+def _captcha_transport(headless: bool, pages):
+    from disclosure_alpha.edisclosure.client import is_captcha_page, is_protection_stub
+
+    tr = BrowserTransport(warmup_url="http://127.0.0.1:1/", headless=headless, min_interval_sec=0,
+                          stub_detector=is_protection_stub, captcha_detector=is_captcha_page,
+                          warmup_timeout_sec=5, captcha_timeout_sec=5)
+    tr._page = _ScriptedPage(pages)
+    tr._context = _FakeContext()
+    return tr
+
+
+def test_captcha_in_headless_mode_raises_with_instructions():
+    from disclosure_alpha.browser import CaptchaRequired
+
+    tr = _captcha_transport(headless=True, pages=[CAPTCHA_HTML])
+    with pytest.raises(CaptchaRequired) as e:
+        tr._wait_for_real_content()
+    assert "--show-browser" in str(e.value)
+
+
+def test_captcha_in_visible_window_waits_until_solved():
+    """В видимом окне капчу проходит человек: ждём, пока страница станет настоящей."""
+    real = "<html><body><h1>Настоящая страница</h1><a href='/x'>ссылка</a></body></html>"
+    tr = _captcha_transport(headless=False, pages=[CAPTCHA_HTML, CAPTCHA_HTML, real])
+    html = tr._wait_for_real_content()
+    assert "Настоящая страница" in html
+
+
+def test_captcha_page_classified_and_not_mistaken_for_content():
+    from disclosure_alpha.edisclosure.client import classify_page, is_protection_stub
+
+    assert classify_page(CAPTCHA_HTML) == "captcha"
+    assert is_protection_stub(CAPTCHA_HTML)          # как контент такую страницу не отдаём
+    assert classify_page(REAL) == "content"
+    assert classify_page(STUB) == "stub"
