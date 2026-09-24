@@ -52,7 +52,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(data.encode("utf-8"))
             return
         if urlparse(self.path).path == "/poisk-po-soobshheniyam":
-            return self._send("""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Поиск</title></head><body>
+            return self._send(r"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Поиск</title></head><body>
 <form id="f"><input type="text" name="dateStart" readonly><input type="text" name="dateFinish" readonly>
 <input type="checkbox" name="eventTypeCheckboxGroup" value="52"><input type="checkbox" name="eventTypeCheckboxGroup" value="12">
 <button type="button" id="sEventSearchForm__button-search">Найти</button></form>
