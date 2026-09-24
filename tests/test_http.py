@@ -66,3 +66,38 @@ def test_parse_cookie_file_with_user_agent_and_wrapped_value(tmp_path):
     assert client.session.headers["sec-ch-ua-platform"] == '"Windows"'
     assert 'v="152"' in client.session.headers["sec-ch-ua"]
     assert client_hints("curl/8") == {}
+
+
+def test_parse_cookie_file_ignores_russian_comments_from_template(tmp_path):
+    """Шаблон config/cookies.example.txt: комментарии по-русски не должны попадать в имена cookies.
+
+    Регрессия: иначе requests падает с UnicodeEncodeError (заголовки передаются в latin-1).
+    """
+    from pathlib import Path as _P
+
+    from disclosure_alpha.http import parse_cookie_file
+
+    template = (_P(__file__).parents[1] / "config" / "cookies.example.txt").read_text("utf-8")
+    filled = template.replace(
+        "spjs=...; spsc=...; spid=...; .AspNetCore.Antiforgery.xxxx=...",
+        "spjs=AbC+dE/9\n   xY==; spsc=q1; spid=z2; .AspNetCore.Antiforgery.tl_x=CfDJ8D2")
+    f = tmp_path / "cookies.txt"
+    f.write_text("﻿" + filled, "utf-8")          # notepad пишет BOM
+
+    pairs, ua = parse_cookie_file(f)
+    assert [n for n, _ in pairs] == ["spjs", "spsc", "spid", ".AspNetCore.Antiforgery.tl_x"]
+    assert dict(pairs)["spjs"] == "AbC+dE/9xY=="
+    assert ua.startswith("Mozilla/5.0 (Windows NT 10.0")
+    for name, value in pairs:                          # всё отправляемое кодируется в latin-1
+        (name + value).encode("latin-1")
+    ua.encode("latin-1")
+
+
+def test_parse_cookie_file_rejects_non_latin1_values(tmp_path):
+    from disclosure_alpha.http import parse_cookie_file
+
+    f = tmp_path / "cookies.txt"
+    f.write_text("User-Agent: Браузер\nok=1; плохая=2; bad=знач\n", "utf-8")
+    pairs, ua = parse_cookie_file(f)
+    assert [n for n, _ in pairs] == ["ok"]
+    assert ua is None

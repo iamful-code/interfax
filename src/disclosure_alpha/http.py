@@ -53,7 +53,22 @@ def decode_body(content: bytes, encoding: Optional[str]) -> str:
 
 
 _UA_LINE_RE = re.compile(r"^\s*user-agent\s*:\s*(.+?)\s*$", re.I | re.M)
-_COOKIE_LINE_RE = re.compile(r"^\s*cookie\s*:\s*", re.I)
+_COOKIE_LINE_RE = re.compile(r"^\s*cookie\s*:\s*", re.I | re.M)
+# имя cookie -- token по RFC 6265; всё остальное (например, строки-комментарии) игнорируем
+_COOKIE_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+
+def _latin1_safe(value: str) -> bool:
+    """HTTP-заголовки передаются в latin-1: значения с другими символами отправить нельзя."""
+    try:
+        value.encode("latin-1")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _strip_comments(text: str) -> str:
+    return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
 
 
 def parse_cookie_file(path: Path, default_domain: str = "e-disclosure.ru") -> tuple[list[tuple[str, str]], Optional[str]]:
@@ -69,10 +84,13 @@ def parse_cookie_file(path: Path, default_domain: str = "e-disclosure.ru") -> tu
     """
     path = Path(path)
     text = path.read_text("utf-8", errors="replace")
-    ua_match = _UA_LINE_RE.search(text)
-    user_agent = ua_match.group(1) if ua_match else None
-    if ua_match:
-        text = text[:ua_match.start()] + text[ua_match.end():]
+    if text.startswith("\ufeff"):          # BOM от notepad
+        text = text[1:]
+    ua_match = _UA_LINE_RE.search(_strip_comments(text))
+    user_agent = ua_match.group(1).strip() if ua_match else None
+    if user_agent and not _latin1_safe(user_agent):
+        log.warning("строка User-Agent в %s содержит недопустимые символы -- игнорируем её", path)
+        user_agent = None
     text = text.strip()
     if not text:
         return [], user_agent
@@ -91,15 +109,25 @@ def parse_cookie_file(path: Path, default_domain: str = "e-disclosure.ru") -> tu
                 tmp.unlink(missing_ok=True)
         return [(c.name, c.value or "") for c in jar], user_agent
 
+    # убираем комментарии, строку User-Agent и префикс "Cookie:"; остаётся сам заголовок
+    body = _strip_comments(text)
+    body = _UA_LINE_RE.sub("", body)
+    body = _COOKIE_LINE_RE.sub("", body)
     pairs: list[tuple[str, str]] = []
-    for part in _COOKIE_LINE_RE.sub("", text).split(";"):
+    skipped = 0
+    for part in body.split(";"):
         if "=" not in part:
             continue
         name, value = part.split("=", 1)
         name = name.strip()
-        if not name:
+        value = re.sub(r"\s+", "", value)          # длинные значения часто переносятся при копировании
+        if not _COOKIE_NAME_RE.match(name) or not _latin1_safe(name + value):
+            skipped += 1
             continue
-        pairs.append((name, re.sub(r"\s+", "", value)))
+        pairs.append((name, value))
+    if skipped:
+        log.warning("в %s пропущено фрагментов, не похожих на cookie: %d (проверьте, что вставлена строка заголовка Cookie)",
+                    path, skipped)
     return pairs, user_agent
 
 
@@ -213,6 +241,8 @@ class HttpClient:
                 for name, value in pairs:
                     self.session.cookies.set(name, value, domain=".e-disclosure.ru", path="/")
                 self.cookies_loaded = len(pairs)
+                if pairs:
+                    log.info("имена cookies: %s", ", ".join(n for n, _ in pairs))
                 if file_ua:
                     # UA из того же браузера, что и cookies: защита часто связывает их между собой
                     self.session.headers["User-Agent"] = file_ua
