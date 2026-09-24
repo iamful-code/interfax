@@ -43,6 +43,8 @@
 
 ## Установка
 
+Пошаговая инструкция для Windows (PowerShell): [docs/windows_quickstart.md](docs/windows_quickstart.md).
+
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
