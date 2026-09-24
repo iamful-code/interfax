@@ -248,9 +248,14 @@ CAPTCHA_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
 class _ScriptedPage:
     """Страница, отдающая заранее заданную последовательность HTML."""
 
-    def __init__(self, pages):
+    def __init__(self, pages, url="http://127.0.0.1:1/"):
         self.pages = list(pages)
         self.reads = 0
+        self.url = url
+
+    def goto(self, url, **kw):
+        self.url = url
+        return None
 
     def wait_for_load_state(self, *a, **kw):
         return None
@@ -277,15 +282,6 @@ def _captcha_transport(headless: bool, pages):
     tr._page = _ScriptedPage(pages)
     tr._context = _FakeContext()
     return tr
-
-
-def test_captcha_in_headless_mode_raises_with_instructions():
-    from disclosure_alpha.browser import CaptchaRequired
-
-    tr = _captcha_transport(headless=True, pages=[CAPTCHA_HTML])
-    with pytest.raises(CaptchaRequired) as e:
-        tr._wait_for_real_content()
-    assert "--show-browser" in str(e.value)
 
 
 def test_captcha_in_visible_window_waits_until_solved():
@@ -346,3 +342,33 @@ def test_page_actions_start_browser_lazily(monkeypatch):
     assert started["n"] == 1
     tr.field_names()           # второй вызов не перезапускает браузер
     assert started["n"] == 1
+
+
+def test_captcha_opens_visible_window_automatically(monkeypatch):
+    """В скрытом режиме капча приводит к переоткрытию браузера с видимым окном, а не к ошибке."""
+    tr = _captcha_transport(headless=True, pages=[CAPTCHA_HTML])
+    tr.auto_visible_on_captcha = True
+    real = "<html><body><h1>Настоящая страница</h1><a href='/x'>с</a></body></html>"
+    relaunched = {"n": 0}
+
+    monkeypatch.setattr(tr, "_close_browser", lambda: None)
+
+    def fake_launch(_ua=None):
+        relaunched["n"] += 1
+        tr._page = _ScriptedPage([real])
+        tr._context = _FakeContext()
+
+    monkeypatch.setattr(tr, "_launch", fake_launch)
+    html = tr._wait_for_real_content()
+    assert "Настоящая страница" in html
+    assert relaunched["n"] == 1 and tr.headless is False and tr._switched_to_visible
+
+
+def test_captcha_raises_when_auto_visible_disabled():
+    from disclosure_alpha.browser import CaptchaRequired
+
+    tr = _captcha_transport(headless=True, pages=[CAPTCHA_HTML])
+    tr.auto_visible_on_captcha = False
+    with pytest.raises(CaptchaRequired) as e:
+        tr._wait_for_real_content()
+    assert "--show-browser" in str(e.value)

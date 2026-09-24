@@ -123,6 +123,7 @@ class BrowserTransport:
         stub_detector: Optional[Callable[[str], bool]] = None,
         captcha_detector: Optional[Callable[[str], bool]] = None,
         captcha_timeout_sec: float = 300.0,
+        auto_visible_on_captcha: bool = True,
         warmup_timeout_sec: float = DEFAULT_WARMUP_TIMEOUT_SEC,
         navigate_for_get: bool = True,
         settle_ms: int = 1500,
@@ -140,6 +141,9 @@ class BrowserTransport:
         self.stub_detector = stub_detector or (lambda _html: False)
         self.captcha_detector = captcha_detector or (lambda _html: False)
         self.captcha_timeout_sec = captcha_timeout_sec
+        # при капче в скрытом режиме открываем видимое окно, чтобы её можно было пройти
+        self.auto_visible_on_captcha = auto_visible_on_captcha
+        self._switched_to_visible = False
         self.warmup_timeout_sec = warmup_timeout_sec
         # GET выполняем настоящей навигацией: защита отличает переход по ссылке от программного запроса
         self.navigate_for_get = navigate_for_get
@@ -199,6 +203,32 @@ class BrowserTransport:
         pages = getattr(self._context, "pages", None)
         self._page = pages[0] if pages else self._context.new_page()
 
+    def _handle_captcha(self) -> bool:
+        """Реакция на капчу. True -- окно только что открыли, страницу надо перезагрузить.
+
+        В видимом окне просто ждём человека; в скрытом -- один раз переоткрываем браузер с окном,
+        а если это запрещено, сообщаем понятной ошибкой.
+        """
+        if not self.headless:
+            return False
+        if self.auto_visible_on_captcha and not self._switched_to_visible:
+            self._switched_to_visible = True
+            log.warning("сайт показывает капчу: открываю видимое окно браузера -- пройдите её там, "
+                        "команда продолжит сама (ожидание до %.0f с)", self.captcha_timeout_sec)
+            url = self._page.url or self.warmup_url
+            self._close_browser()
+            self.headless = False
+            self._launch(self.user_agent)
+            try:
+                self._page.goto(url, wait_until="domcontentloaded")
+            except Exception as exc:  # noqa: BLE001
+                if not _is_navigation_error(exc):
+                    raise
+            return True
+        raise CaptchaRequired(
+            "сайт показывает капчу. Запустите ту же команду с видимым окном (--show-browser), пройдите капчу "
+            "в нём -- профиль сохранится в каталоге браузера, и дальше команды пойдут без неё")
+
     def _read_user_agent(self) -> str:
         try:
             return self._page.evaluate("() => navigator.userAgent") or ""
@@ -246,15 +276,13 @@ class BrowserTransport:
         while time.time() < deadline:
             html = self._safe_content()
             if html is not None and self.captcha_detector(html):
-                if self.headless:
-                    raise CaptchaRequired(
-                        "сайт показывает капчу. Запустите команду с видимым окном (--show-browser), пройдите капчу "
-                        "в нём -- профиль сохранится в каталоге браузера, и дальше команды пойдут без неё")
+                self._handle_captcha()
                 if not announced_captcha:
                     announced_captcha = True
                     deadline = max(deadline, time.time() + self.captcha_timeout_sec)
-                    log.warning("сайт показывает капчу: пройдите её в открывшемся окне браузера, "
-                                "команда продолжит сама (ожидание до %.0f с)", self.captcha_timeout_sec)
+                    if not self._switched_to_visible:
+                        log.warning("сайт показывает капчу: пройдите её в открывшемся окне браузера, "
+                                    "команда продолжит сама (ожидание до %.0f с)", self.captcha_timeout_sec)
             elif html is not None and not self.stub_detector(html):
                 html = self._settle(html)
                 self.cookies_loaded = len(self._context.cookies())
@@ -352,13 +380,12 @@ class BrowserTransport:
             if current is not None:
                 html = current
                 if self.captcha_detector(html):
-                    if self.headless:
-                        raise CaptchaRequired(
-                            "сайт показывает капчу. Запустите команду с видимым окном (--show-browser) и пройдите её")
+                    self._handle_captcha()
                     if not announced_captcha:
                         announced_captcha = True
                         deadline = max(deadline, time.time() + self.captcha_timeout_sec)
-                        log.warning("капча: пройдите её в окне браузера, команда продолжит сама")
+                        if not self._switched_to_visible:
+                            log.warning("капча: пройдите её в окне браузера, команда продолжит сама")
                 elif not self.stub_detector(html):
                     return html
             try:

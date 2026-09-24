@@ -39,6 +39,9 @@ class Settings:
     browser_warmup_timeout_sec: float = field(default_factory=lambda: float(_env("BROWSER_WARMUP_TIMEOUT", "60")))
     # GET настоящей навигацией (надёжно, но медленно). DA_BROWSER_NAVIGATE_GET=0 -- запрос изнутри страницы,
     # заметно быстрее при массовом сборе; помогает не всегда, зависит от настроек защиты.
+    # при капче в скрытом режиме автоматически открыть видимое окно (DA_BROWSER_AUTO_VISIBLE=0 -- выключить)
+    browser_auto_visible_on_captcha: bool = field(
+        default_factory=lambda: _env("BROWSER_AUTO_VISIBLE", "1") not in ("0", "false", "no"))
     browser_settle_ms: int = field(default_factory=lambda: int(_env("BROWSER_SETTLE_MS", "1500")))
     browser_navigate_get: bool = field(default_factory=lambda: _env("BROWSER_NAVIGATE_GET", "1") not in ("0", "false", "no"))
 

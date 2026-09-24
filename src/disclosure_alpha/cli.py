@@ -301,8 +301,11 @@ def main(argv=None) -> int:
         args.func(args)
     except Exception as exc:  # noqa: BLE001
         if type(exc).__name__ == "CaptchaRequired":
+            parts = list(argv if argv is not None else sys.argv[1:])
+            if "--show-browser" not in parts:
+                parts.append("--show-browser")
             print(f"\nСайт показал капчу: {exc}\n"
-                  f"Команда: {' '.join(['disclosure-alpha', args.cmd, '--show-browser'])}", file=sys.stderr)
+                  f"Повторите так: disclosure-alpha {' '.join(parts)}", file=sys.stderr)
             return 2
         raise
     return 0

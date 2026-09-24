@@ -67,6 +67,7 @@ class EDisclosureClient:
                 user_data_dir=self.settings.browser_profile_dir,
                 stub_detector=is_protection_stub,
                 captcha_detector=is_captcha_page,
+                auto_visible_on_captcha=self.settings.browser_auto_visible_on_captcha,
                 warmup_timeout_sec=self.settings.browser_warmup_timeout_sec,
                 navigate_for_get=self.settings.browser_navigate_get,
                 settle_ms=self.settings.browser_settle_ms,
