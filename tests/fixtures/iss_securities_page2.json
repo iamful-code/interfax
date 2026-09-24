@@ -1,0 +1,10 @@
+{
+  "securities": {
+    "columns": ["id", "secid", "shortname", "regnumber", "name", "isin", "is_traded", "emitent_id", "emitent_title", "emitent_inn", "emitent_okpo", "gosreg", "type", "group", "primary_boardid", "marketprice_boardid"],
+    "data": [
+      [5, "DSKY", "ДетскийМир", "1-02-00844-A", "Детский мир ПАО ао", "RU000A0JSQ90", 0, 4, "Публичное акционерное общество \"Детский мир\"", "7729355029", "18320970", "1-02-00844-A", "common_share", "stock_shares", "TQBR", "TQBR"],
+      [6, "MFON", "МегаФон ао", "1-03-00822-J", "МегаФон ПАО ао", "RU000A0JS942", 0, 5, "Публичное акционерное общество \"МегаФон\"", "7812014560", "13446106", "1-03-00822-J", "common_share", "stock_shares", "TQBR", "TQBR"],
+      [7, "FIVE", "FIVE-гдр", null, "ГДР X5 RetailGroup ORD SHS", "US98387E2054", 0, null, "X5 Retail Group N.V.", null, null, null, "depositary_receipt", "stock_dr", "TQBR", "TQBR"]
+    ]
+  }
+}
