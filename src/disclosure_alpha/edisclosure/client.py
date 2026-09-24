@@ -67,6 +67,7 @@ class EDisclosureClient:
                 user_data_dir=self.settings.browser_profile_dir,
                 stub_detector=is_protection_stub,
                 warmup_timeout_sec=self.settings.browser_warmup_timeout_sec,
+                navigate_for_get=self.settings.browser_navigate_get,
             )
         self.http = http or HttpClient(
             min_interval_sec=self.settings.edisclosure_min_interval_sec,

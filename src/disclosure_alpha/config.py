@@ -37,6 +37,9 @@ class Settings:
     use_browser: bool = field(default_factory=lambda: _env("BROWSER", "0") not in ("0", "", "false", "no"))
     browser_headless: bool = field(default_factory=lambda: _env("BROWSER_HEADLESS", "1") not in ("0", "false", "no"))
     browser_warmup_timeout_sec: float = field(default_factory=lambda: float(_env("BROWSER_WARMUP_TIMEOUT", "60")))
+    # GET настоящей навигацией (надёжно, но медленно). DA_BROWSER_NAVIGATE_GET=0 -- запрос изнутри страницы,
+    # заметно быстрее при массовом сборе; помогает не всегда, зависит от настроек защиты.
+    browser_navigate_get: bool = field(default_factory=lambda: _env("BROWSER_NAVIGATE_GET", "1") not in ("0", "false", "no"))
 
     # --- HTTP ---
     user_agent: str = field(default_factory=lambda: _env(

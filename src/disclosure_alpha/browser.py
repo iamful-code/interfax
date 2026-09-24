@@ -118,6 +118,7 @@ class BrowserTransport:
         user_agent: Optional[str] = None,
         stub_detector: Optional[Callable[[str], bool]] = None,
         warmup_timeout_sec: float = DEFAULT_WARMUP_TIMEOUT_SEC,
+        navigate_for_get: bool = True,
     ):
         self.warmup_url = warmup_url
         self.min_interval_sec = min_interval_sec
@@ -131,6 +132,8 @@ class BrowserTransport:
         self.user_agent = user_agent
         self.stub_detector = stub_detector or (lambda _html: False)
         self.warmup_timeout_sec = warmup_timeout_sec
+        # GET выполняем настоящей навигацией: защита отличает переход по ссылке от программного запроса
+        self.navigate_for_get = navigate_for_get
 
         self._pw = None
         self._browser = None
@@ -273,6 +276,7 @@ class BrowserTransport:
         headers: Optional[Mapping[str, str]] = None,
         use_cache: bool = True,
         allow_redirects: bool = True,
+        prefer_fetch: bool = False,
     ) -> FetchResult:
         key = _cache_key(method, url, params, data)
         if use_cache:
@@ -288,7 +292,7 @@ class BrowserTransport:
             self._throttle()
             self._last_request_ts = time.time()
             self.stats["requests"] += 1
-            res = self._fetch_once(method, url, params, data, headers)
+            res = self._fetch_once(method, url, params, data, headers, prefer_fetch)
             last_status = res.status
             html_like = "html" in (res.headers.get("content-type", "") or "").lower() or res.content[:512].lstrip().startswith(b"<")
             if res.ok and html_like and self.stub_detector(res.text):
@@ -310,22 +314,89 @@ class BrowserTransport:
         raise HttpError(url, last_status, "исчерпаны попытки")
 
     def _fetch_once(self, method: str, url: str, params: Optional[Mapping], data: Optional[Mapping],
-                    headers: Optional[Mapping[str, str]]) -> FetchResult:
-        req_headers = {k: v for k, v in (headers or {}).items()}
-        if method.upper() == "GET":
-            full = url + (("?" + urlencode(dict(params), doseq=True)) if params else "")
-            resp = self._context.request.get(full, headers=req_headers or None, timeout=self.timeout_sec * 1000)
-        else:
+                    headers: Optional[Mapping[str, str]], prefer_fetch: bool = False) -> FetchResult:
+        full = url + (("?" + urlencode(dict(params), doseq=True)) if params else "")
+        if method.upper() == "GET" and self.navigate_for_get and not prefer_fetch:
+            return self._fetch_by_navigation(full)
+        return self._fetch_from_page(method, full, data, headers)
+
+    def _wait_for_real_content(self, deadline: Optional[float] = None) -> str:
+        """Ждёт, пока страница перестанет быть заглушкой проверки (она перезагружает себя сама)."""
+        deadline = deadline or (time.time() + self.warmup_timeout_sec)
+        html = ""
+        while time.time() < deadline:
+            current = self._safe_content()
+            if current is not None:
+                html = current
+                if not self.stub_detector(html):
+                    return html
+            try:
+                self._page.wait_for_timeout(500)
+            except Exception:  # noqa: BLE001
+                time.sleep(0.5)
+        return html
+
+    def _fetch_by_navigation(self, url: str) -> FetchResult:
+        """GET как обычный переход по ссылке: браузер сам проходит проверку и отдаёт готовый DOM."""
+        resp = None
+        try:
+            resp = self._page.goto(url, wait_until="domcontentloaded")
+        except Exception as exc:  # noqa: BLE001
+            if not _is_navigation_error(exc):
+                raise
+        html = self._wait_for_real_content()
+        status = 200
+        resp_headers: dict = {}
+        final_url = url
+        try:
+            if resp is not None:
+                status = resp.status
+                resp_headers = dict(resp.all_headers())
+            final_url = self._page.url or url
+        except Exception as exc:  # noqa: BLE001
+            if not _is_navigation_error(exc):
+                raise
+        if self.stub_detector(html):
+            status = status if status != 200 else 200      # заглушка приходит с кодом 200
+        return FetchResult(url=final_url, status=status, content=html.encode("utf-8"),
+                           headers=resp_headers or {"content-type": "text/html; charset=utf-8"}, encoding="utf-8")
+
+    _FETCH_SCRIPT = """async (arg) => {
+        const init = {method: arg.method, credentials: 'include', headers: arg.headers || {}};
+        if (arg.body !== null && arg.body !== undefined) { init.body = arg.body; }
+        const r = await fetch(arg.url, init);
+        const text = await r.text();
+        const headers = {};
+        r.headers.forEach((v, k) => { headers[k] = v; });
+        return {status: r.status, url: r.url, text: text, headers: headers};
+    }"""
+
+    def _ensure_same_origin(self, url: str) -> None:
+        """fetch выполняется в контексте страницы, поэтому она должна быть того же происхождения."""
+        target = url.split("/", 3)[:3]
+        current = (self._page.url or "").split("/", 3)[:3]
+        if current != target:
+            try:
+                self._page.goto("/".join(target) + "/", wait_until="domcontentloaded")
+                self._wait_for_real_content()
+            except Exception as exc:  # noqa: BLE001
+                if not _is_navigation_error(exc):
+                    raise
+
+    def _fetch_from_page(self, method: str, url: str, data: Optional[Mapping],
+                         headers: Optional[Mapping[str, str]]) -> FetchResult:
+        """POST (и JSON-запросы) выполняются как fetch изнутри страницы: те же cookies, Origin и Referer."""
+        self._ensure_same_origin(url)
+        req_headers = {k: v for k, v in (headers or {}).items() if k.lower() not in ("referer", "origin", "host")}
+        body = None
+        if method.upper() != "GET":
             body = urlencode(dict(data or {}), doseq=True)
             req_headers.setdefault("content-type", FORM_CONTENT_TYPE)
-            full = url + (("?" + urlencode(dict(params), doseq=True)) if params else "")
-            resp = self._context.request.post(full, data=body, headers=req_headers, timeout=self.timeout_sec * 1000)
-        resp_headers = dict(resp.headers)
-        encoding = None
-        ctype = resp_headers.get("content-type", "")
-        if "charset=" in ctype:
-            encoding = ctype.split("charset=", 1)[1].split(";")[0].strip()
-        return FetchResult(url=resp.url, status=resp.status, content=resp.body(), headers=resp_headers, encoding=encoding)
+        result = self._page.evaluate(self._FETCH_SCRIPT, {"method": method.upper(), "url": url,
+                                                          "body": body, "headers": req_headers})
+        text = result.get("text") or ""
+        return FetchResult(url=result.get("url") or url, status=int(result.get("status", 0)),
+                           content=text.encode("utf-8"), headers=dict(result.get("headers") or {}), encoding="utf-8")
 
     def get(self, url: str, params: Optional[Mapping] = None, **kw) -> FetchResult:
         return self.request("GET", url, params=params, **kw)
@@ -338,4 +409,5 @@ class BrowserTransport:
         return self.get(url, params=params, **kw).text
 
     def get_json(self, url: str, params: Optional[Mapping] = None, **kw) -> Any:
+        kw.setdefault("prefer_fetch", True)      # JSON нельзя брать из DOM -- запрашиваем через fetch
         return self.get(url, params=params, **kw).json()

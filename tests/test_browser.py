@@ -42,6 +42,14 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._passed():
             return self._send(STUB)
         q = parse_qs(urlparse(self.path).query)
+        if urlparse(self.path).path.endswith(".json"):
+            data = '{"ok": true, "n": 42}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data.encode("utf-8"))
+            return
         if "EventId" in q:
             return self._send(f"<html><body>событие {q['EventId'][0]}</body></html>")
         self._send(REAL)
@@ -114,13 +122,30 @@ def test_post_form_with_repeated_fields(transport, server):
     assert "eventTypeCheckboxGroup=52|12" in res.text      # повторяющиеся поля дошли списком
 
 
-def test_rewarms_when_cookies_dropped(transport, server):
+def test_recovers_when_cookies_dropped(transport, server):
+    """После сброса cookies навигация снова проходит проверку (страница перезагружает себя сама)."""
     base = f"http://127.0.0.1:{server.server_address[1]}"
     transport._context.clear_cookies()
-    warmups_before = transport.stats["warmups"]
     res = transport.get(base + "/poisk", use_cache=False)
     assert "Настоящая страница" in res.text
-    assert transport.stats["warmups"] > warmups_before   # заглушка распознана, прогрев повторён
+    assert not _stub(res.text)
+
+
+def test_get_uses_real_navigation(transport, server):
+    """GET должен быть настоящим переходом: защита отличает его от программного запроса."""
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    before = len(server.hits)
+    transport.get(base + "/poisk", use_cache=False)
+    navigations = [h for h in server.hits[before:] if h[0] == "GET"]
+    assert navigations, "переход не выполнен"
+    assert transport._page.url.startswith(base)        # страница действительно перешла по адресу
+
+
+def test_json_request_bypasses_dom(transport, server):
+    """get_json не должен заворачивать ответ в DOM-обёртку браузера."""
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    data = transport.get_json(base + "/api.json", use_cache=False)
+    assert data == {"ok": True, "n": 42}
 
 
 class _FlakyPage:
