@@ -287,20 +287,22 @@ class EDisclosureClient:
         return summary
 
     # ------------------------------------------------------------------ поиск через саму форму (браузер)
-    # порядок важен: sEventSearchForm -- это форма выбора типов сообщений, а не общий поиск
-    SEARCH_BUTTON_SELECTORS = ("#period__button-search", "[id^='period'][id*='search']",
+    # кнопка поиска на странице называется sendButton; остальные -- запасные варианты
+    SEARCH_BUTTON_SELECTORS = ("#sendButton", "#searchButton", "[id*='sendButton']",
+                               "form#sEventSearchForm button.button", ".search-form__buttons button",
                                "[id*='button-search']:not([id*='sEventSearchForm'])",
-                               "[class*='button-search']:not([class*='sEventSearchForm'])",
-                               "form button[type=submit]", "form input[type=submit]",
-                               "button[type=submit]", "input[type=submit]",
+                               "form button[type=submit]", "button[type=submit]", "input[type=submit]",
                                "#sEventSearchForm__button-search")
-    CONFIRM_BUTTON_SELECTORS = ("#sEventSearchForm__button-confirm", ".sEventSearchForm__button-confirm")
-    # ждать нужно именно ссылки на сообщения: таблицы на странице есть и до поиска (дерево типов, календарь)
-    RESULTS_SELECTORS = ("a[href*='EventId']", "a[href*='/event/']", "a[href*='soobshhenie']",
-                         "a[href*='/message']", "#searchResults a", "[class*=searchResult] a")
+    RESULTS_CONTAINER = "#searchResults"
+    # кнопка подтверждения выбора типов сообщений в выпадающем списке
+    CONFIRM_BUTTON_SELECTORS = ("#sEventSearchForm__button-confirm", ".sEventSearchForm__button-confirm",
+                                "[id*='button-confirm']")
+    RESULTS_SELECTORS = ("#searchResults a", "#searchResults tr", "a[href*='EventId']",
+                         "a[href*='/event/']", "a[href*='soobshhenie']", "a[href*='/message']")
 
     def search_via_form(self, date_from: date, date_till: date, event_type_ids: Optional[Iterable[str]] = None,
-                        query: Optional[str] = None, wait_selector: Optional[str] = None) -> tuple[list[MessageRow], str]:
+                        query: Optional[str] = None, wait_selector: Optional[str] = None,
+                        page: int = 1, page_size: int = 100) -> tuple[list[MessageRow], str]:
         """Заполняет форму поиска прямо в браузере и нажимает «Найти». Возвращает (строки, HTML результатов).
 
         Используется в браузерном режиме, потому что форму отправляет скрипт страницы, а не обычный POST.
@@ -316,6 +318,9 @@ class EDisclosureClient:
         }
         if query:
             filled[fm["query"]] = tr.fill_field(fm["query"], query)
+        # скрытые поля постраничной выдачи: по умолчанию сайт показывает 10 строк
+        filled[fm["page"]] = tr.fill_field(fm["page"], str(page))
+        filled[fm["page_size"]] = tr.fill_field(fm["page_size"], str(page_size))
         checked = 0
         if event_type_ids:
             checked = tr.set_checkbox_group(fm["event_types"], [str(x) for x in event_type_ids])
@@ -347,7 +352,8 @@ class EDisclosureClient:
             if not tr.click(sel, timeout_ms=4000):
                 continue
             selector_used = selector_used or sel
-            tr.wait_for_selector(wait_selector or ", ".join(self.RESULTS_SELECTORS), timeout_ms=15_000)
+            if not tr.wait_for_non_empty(self.RESULTS_CONTAINER, timeout_ms=20_000):
+                tr.wait_for_selector(wait_selector or ", ".join(self.RESULTS_SELECTORS), timeout_ms=5_000)
             html = tr.current_html()
             rows = parsers.parse_search_results(html, self.base_url)
             log.info("кнопка %s: разобрано сообщений %d", sel, len(rows))
@@ -395,6 +401,14 @@ class EDisclosureClient:
         rows, html = self.search_via_form(date_from, date_till, event_type_ids)
         (out_dir / "search_results.html").write_text(html, "utf-8")
         requests_log = self.http.recorded_requests()
+        # повторяем обращения к собственному интерфейсу сайта, чтобы увидеть форму ответа
+        for rec in requests_log:
+            if "/api/" not in rec["url"] or not rec["url"].startswith(self.base_url):
+                continue
+            replayed = self.http.replay(rec)
+            if replayed is not None:
+                rec["response_head"] = replayed.text[:3000]
+                rec["response_status"] = replayed.status
         summary = {"date_from": str(date_from), "date_till": str(date_till),
                    "event_type_ids": list(event_type_ids or []), "rows_parsed": len(rows),
                    "sample": [r.to_dict() for r in rows[:5]], "dom": parsers.describe_dom(html),

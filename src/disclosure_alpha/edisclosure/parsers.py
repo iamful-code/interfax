@@ -24,6 +24,23 @@ OGRN_RE = re.compile(r"ОГРН\D{0,20}?(\d{13}|\d{15})\b")
 OKPO_RE = re.compile(r"ОКПО\D{0,20}?(\d{8,10})\b")
 
 
+# запасные схемы адресов сообщения на случай, если сайт ушёл от event.aspx?EventId=
+_EVENT_PATH_RE = re.compile(r"/(?:event|events|soobshhenie|soobshheniya|message|messages|news)/([A-Za-z0-9_\-]{3,})", re.I)
+
+
+def event_id_from_href(href: str) -> Optional[str]:
+    """Идентификатор сообщения из ссылки: параметр EventId либо последний сегмент адреса сообщения."""
+    if not href:
+        return None
+    m = EVENT_ID_RE.search(href)
+    if m:
+        return m.group(1)
+    m = _EVENT_PATH_RE.search(href.split("?")[0])
+    if m:
+        return m.group(1)
+    return None
+
+
 def soup_of(html: str) -> BeautifulSoup:
     return BeautifulSoup(html, "lxml")
 
@@ -142,14 +159,14 @@ def parse_search_form(html: str, base_url: str = "https://e-disclosure.ru", page
 
 # ----------------------------------------------------------------------------- список сообщений
 def _extract_row(node: Tag, base_url: str) -> Optional[MessageRow]:
-    link = None
+    link, event_id = None, None
     for a in node.find_all("a", href=True):
-        if EVENT_ID_RE.search(a["href"]):
-            link = a
+        candidate = event_id_from_href(a["href"])
+        if candidate:
+            link, event_id = a, candidate
             break
     if link is None:
         return None
-    event_id = EVENT_ID_RE.search(link["href"]).group(1)
     url = urljoin(base_url, link["href"])
 
     company_id = None
@@ -184,30 +201,51 @@ def _extract_row(node: Tag, base_url: str) -> Optional[MessageRow]:
                       published_at=published_at, event_type=event_type, url=url)
 
 
-def parse_message_list(html: str, base_url: str = "https://e-disclosure.ru") -> list[MessageRow]:
-    """Универсальный разбор списка сообщений: строки таблицы результатов поиска или блоки ленты.
+RESULTS_CONTAINER_IDS = ("searchResults", "searchResult", "results", "eventsList")
 
-    Единицей считается ближайший контейнер (tr / li / div-элемент) вокруг ссылки на событие.
+
+def results_container(soup: BeautifulSoup) -> Optional[Tag]:
+    """Блок, куда сайт вставляет результаты поиска (#searchResults и подобные)."""
+    for cid in RESULTS_CONTAINER_IDS:
+        node = soup.find(id=cid)
+        if node is not None:
+            return node
+    return None
+
+
+def parse_message_list(html: str, base_url: str = "https://e-disclosure.ru", only_results: bool = False) -> list[MessageRow]:
+    """Разбор списка сообщений: строки таблицы результатов или блоки ленты.
+
+    Единицей считается ближайший контейнер (tr / li / div) вокруг ссылки на сообщение.
+    ``only_results=True`` -- искать лишь внутри блока результатов (на странице поиска много прочих ссылок).
     """
     soup = soup_of(html)
+    scope: Tag | BeautifulSoup = soup
+    if only_results:
+        container = results_container(soup)
+        if container is None:
+            return []
+        scope = container
     rows: list[MessageRow] = []
     seen: set[str] = set()
-    for a in soup.find_all("a", href=True):
-        if not EVENT_ID_RE.search(a["href"]):
+    for a in scope.find_all("a", href=True):
+        if not event_id_from_href(a["href"]):
             continue
-        container = a.find_parent("tr")
-        if container is None:
-            container = a.find_parent("li")
-        if container is None:
+        row_container = a.find_parent("tr")
+        if row_container is None:
+            row_container = a.find_parent(class_=re.compile(r"table__row|row|item", re.I))
+        if row_container is None:
+            row_container = a.find_parent("li")
+        if row_container is None:
             # ближайший div, который содержит дату (иначе поднимаемся выше)
-            container = a.find_parent("div")
+            row_container = a.find_parent("div")
             hops = 0
-            while container is not None and hops < 4 and not DATETIME_RE.search(container.get_text(" ")):
-                container = container.find_parent("div")
+            while row_container is not None and hops < 4 and not DATETIME_RE.search(row_container.get_text(" ")):
+                row_container = row_container.find_parent("div")
                 hops += 1
-        if container is None:
-            container = a
-        row = _extract_row(container, base_url)
+        if row_container is None:
+            row_container = a
+        row = _extract_row(row_container, base_url)
         if row is None or row.event_id in seen:
             continue
         seen.add(row.event_id)
@@ -216,7 +254,9 @@ def parse_message_list(html: str, base_url: str = "https://e-disclosure.ru") -> 
 
 
 def parse_search_results(html: str, base_url: str = "https://e-disclosure.ru") -> list[MessageRow]:
-    return parse_message_list(html, base_url)
+    """Результаты поиска: сначала внутри блока результатов, иначе по всей странице (старая вёрстка)."""
+    rows = parse_message_list(html, base_url, only_results=True)
+    return rows or parse_message_list(html, base_url)
 
 
 def parse_lastnews(html: str, base_url: str = "https://e-disclosure.ru") -> list[MessageRow]:

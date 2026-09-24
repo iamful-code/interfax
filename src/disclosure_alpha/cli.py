@@ -114,8 +114,10 @@ def cmd_probe_search(args):
     if reqs:
         print("запросы страницы после нажатия «Найти»:")
         for r in reqs[:15]:
-            post = f" данные={r['post_data'][:160]}" if r.get("post_data") else ""
+            post = f" данные={r['post_data'][:300]}" if r.get("post_data") else ""
             print(f"  {r['method']} {r['status']} {r['resource_type']} {r['url'][:140]}{post}")
+            if r.get("response_head"):
+                print(f"      ответ ({r.get('response_status')}): {r['response_head'][:400]}")
     else:
         print("страница не отправила ни одного запроса после нажатия (результат уже был на странице?)")
     for row in summary["sample"]:

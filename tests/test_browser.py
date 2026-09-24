@@ -55,23 +55,24 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(r"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Поиск</title></head><body>
 <form id="f"><input type="text" name="dateStart" readonly><input type="text" name="dateFinish" readonly>
 <input type="checkbox" name="eventTypeCheckboxGroup" value="52"><input type="checkbox" name="eventTypeCheckboxGroup" value="12">
+<input type="hidden" name="lastPageNumber" value="1"><input type="hidden" name="lastPageSize" value="10">
 <button type="button" id="sEventSearchForm__button-search">Фильтр типов</button>
-<button type="button" id="period__button-search">Найти</button></form>
+<button type="button" class="button" id="sendButton">Искать</button></form>
 <script src="/src/js/app.js"></script>
 <div id="cookieBanner" style="position:fixed;left:0;top:0;width:100%;height:100%;z-index:99">
   <button id="AcceptCookieBtn">Принять</button></div>
-<div id="results"></div>
+<div id="searchResults"></div>
 <script>document.getElementById('AcceptCookieBtn').addEventListener('click', function(){
   document.getElementById('cookieBanner').remove(); });</script>
 <script>
 document.getElementById('sEventSearchForm__button-search').addEventListener('click', function(){
   return; });
-document.getElementById('period__button-search').addEventListener('click', function(){
+document.getElementById('sendButton').addEventListener('click', function(){
   const types = Array.from(document.querySelectorAll('input[name=eventTypeCheckboxGroup]:checked')).map(b => b.value);
   const from = document.querySelector('input[name=dateStart]').value.replace(/\./g, '');
   const till = document.querySelector('input[name=dateFinish]').value.replace(/\./g, '');
   setTimeout(function(){
-    document.getElementById('results').innerHTML =
+    document.getElementById('searchResults').innerHTML =
       '<table><tr><td>15.03.2024 18:52</td><td><a href="/portal/company.aspx?id=3043">ПАО Сбербанк</a></td>' +
       '<td><a href="/portal/event.aspx?EventId=E-' + from + '-' + till + '-' + types.join('_') + '">Тип сообщения</a></td></tr></table>';
   }, 300);
@@ -442,7 +443,7 @@ def test_records_requests_made_by_the_page(transport, server, tmp_path):
 
 
 def test_tries_buttons_until_results_appear(transport, server, tmp_path):
-    """Первая подходящая кнопка -- фильтр типов сообщений; поиск запускает другая."""
+    """Кнопка фильтра типов ничего не даёт; поиск запускает sendButton."""
     from disclosure_alpha.config import Settings
     from disclosure_alpha.edisclosure.client import EDisclosureClient
 
@@ -465,3 +466,17 @@ def test_discovers_api_paths_from_site_scripts(transport, server, tmp_path):
     assert "/api/data/sevents?page=1" in paths or "/api/data/sevents" in "".join(paths)
     assert "/api/data/sevent-types" in paths
     assert api["scripts_checked"]
+
+
+def test_pagination_fields_are_set(transport, server, tmp_path):
+    """Скрытые поля постраничной выдачи заполняются: иначе сайт отдаёт только первые 10 строк."""
+    from disclosure_alpha.config import Settings
+    from disclosure_alpha.edisclosure.client import EDisclosureClient
+
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    client = EDisclosureClient(Settings(data_dir=tmp_path / "data", edisclosure_base_url=base), http=transport)
+    client.search_via_form(date(2024, 3, 14), date(2024, 3, 15), page=3, page_size=100)
+    values = transport._page.evaluate(
+        "() => ({page: document.querySelector('input[name=lastPageNumber]').value,"
+        " size: document.querySelector('input[name=lastPageSize]').value})")
+    assert values == {"page": "3", "size": "100"}

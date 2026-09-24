@@ -648,6 +648,36 @@ class BrowserTransport:
         except Exception:  # noqa: BLE001
             return False
 
+    def wait_for_non_empty(self, selector: str, timeout_ms: int = 20_000) -> bool:
+        """Ждёт, пока в блоке появится содержимое (результаты вставляются скриптом)."""
+        self._ensure_started()
+        try:
+            self._page.wait_for_function(
+                "(sel) => { const e = document.querySelector(sel); return !!e && e.children.length > 0; }",
+                arg=selector, timeout=timeout_ms)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def replay(self, rec: Mapping) -> Optional[FetchResult]:
+        """Повторяет записанный запрос страницы -- чтобы увидеть, что именно отвечает сервер."""
+        try:
+            method = str(rec.get("method", "GET")).upper()
+            url = str(rec["url"])
+            if method == "GET":
+                return self.request("GET", url, prefer_fetch=True, use_cache=False)
+            body = rec.get("post_data") or ""
+            headers = {"content-type": "application/json"} if body.strip().startswith(("{", "[")) else None
+            self._ensure_same_origin(url)
+            result = self._page.evaluate(self._FETCH_SCRIPT, {"method": method, "url": url, "body": body,
+                                                              "headers": headers or {}})
+            text = result.get("text") or ""
+            return FetchResult(url=result.get("url") or url, status=int(result.get("status", 0)),
+                               content=text.encode("utf-8"), headers=dict(result.get("headers") or {}), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("повтор запроса не удался: %s", exc)
+            return None
+
     def field_names(self) -> list[str]:
         self._ensure_started()
         try:
