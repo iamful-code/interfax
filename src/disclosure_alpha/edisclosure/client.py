@@ -24,6 +24,8 @@ from . import parsers
 log = logging.getLogger(__name__)
 
 SEARCH_PATH = "/poisk-po-soobshheniyam"
+API_SEARCH_PATH = "/api/search/sevents"          # тот же поиск, что делает страница
+API_EVENT_TYPES_PATH = "/api/data/sevent-types"  # справочник типов сообщений: [{"id":..,"name":..}]
 COMPANY_SEARCH_PATH = "/poisk-po-kompaniyam"
 LASTNEWS_PATH = "/portal/lastnews.aspx"
 EVENT_PATH = "/portal/event.aspx"
@@ -392,6 +394,53 @@ class EDisclosureClient:
         log.info("диагностика сохранена: %s", path)
         return path
 
+    def fetch_event_types(self) -> list[dict]:
+        """Справочник типов сообщений сайта: список {id, name}. Сохраняется в data/processed/event_types.json."""
+        res = self.http.get(self.url(API_EVENT_TYPES_PATH), prefer_fetch=True, use_cache=True)
+        types = res.json()
+        if isinstance(types, dict):
+            types = types.get("items") or types.get("data") or []
+        out = [{"id": str(t.get("id")), "name": t.get("name", "")} for t in types if isinstance(t, dict)]
+        path = Path(self.settings.processed_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "event_types.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), "utf-8")
+        log.info("типов сообщений в справочнике сайта: %d", len(out))
+        return out
+
+    def search_api(self, date_from: date, date_till: date, event_type_ids: Optional[Iterable[str]] = None,
+                   page: int = 1, page_size: int = 100, query: Optional[str] = None,
+                   use_cache: bool = True) -> tuple[list[MessageRow], str]:
+        """Прямой запрос к поиску сайта -- то же, что делает страница при нажатии «Искать».
+
+        Ответ -- кусок разметки с таблицей результатов; разбирается тем же парсером.
+        """
+        if not self.is_browser:
+            raise RuntimeError("прямой поиск доступен в браузерном режиме (--browser)")
+        tr = self.http
+        if SEARCH_PATH not in (getattr(tr, "_page", None).url if getattr(tr, "_page", None) else ""):
+            tr.open_page(self.url(SEARCH_PATH))
+        payload: list[tuple[str, str]] = [
+            ("eventTypeTerm", ""), ("radView", "0"),
+            ("dateStart", _fmt_date(date_from)), ("dateFinish", _fmt_date(date_till)),
+            ("textfieldEvent", ""), ("radReg", "FederalDistricts"),
+            ("districtsCheckboxGroup", "-1"), ("regionsCheckboxGroup", "-1"), ("branchesCheckboxGroup", "-1"),
+            ("textfieldCompany", ""), ("lastPageSize", str(page_size)), ("lastPageNumber", str(page)),
+            ("query", query or ""), ("queryEvent", ""),
+        ]
+        for tid in (event_type_ids or []):
+            payload.append(("eventTypeCheckboxGroup", str(tid)))
+        headers = {"content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                   "x-requested-with": "XMLHttpRequest", "accept": "*/*"}
+        token = tr.input_value("__RequestVerificationToken")
+        if token:
+            headers["RequestVerificationToken"] = token
+        res = tr.request("POST", self.url(API_SEARCH_PATH), data=payload, headers=headers,
+                         use_cache=use_cache, prefer_fetch=True)
+        rows = parsers.parse_search_results(res.text, self.base_url)
+        if not rows:
+            rows = parsers.parse_message_list(res.text, self.base_url)
+        return rows, res.text
+
     def probe_search(self, date_from: date, date_till: date, event_type_ids: Optional[Iterable[str]] = None,
                      out_dir: Optional[Path] = None) -> dict:
         """Разведка результатов поиска: выполняет запрос через форму и описывает разметку ответа."""
@@ -481,6 +530,14 @@ class EDisclosureClient:
                 return self._send_search(retry_payload, use_cache, _retry=False)
             raise
 
+    def _search_one_page(self, date_from: date, date_till: date, page: int, page_size: int,
+                         event_type_ids, query, query_id, use_cache: bool) -> tuple[list[MessageRow], str]:
+        """Одна страница результатов: прямым запросом в браузерном режиме, иначе обычной отправкой формы."""
+        if self.is_browser:
+            return self.search_api(date_from, date_till, event_type_ids, page=page, page_size=page_size,
+                                   query=query, use_cache=use_cache)
+        return self.search_page(date_from, date_till, page, page_size, event_type_ids, query, query_id, use_cache)
+
     def iter_search(self, date_from: date, date_till: date, chunk_days: int = 1,
                     event_type_ids: Optional[Iterable[str]] = None, query: Optional[str] = None,
                     query_id: Optional[int] = None, page_size: int = DEFAULT_PAGE_SIZE,
@@ -495,7 +552,7 @@ class EDisclosureClient:
             chunk_end = min(cur + timedelta(days=chunk_days - 1), date_till)
             seen: set[str] = set()
             for page in range(1, MAX_PAGES_PER_CHUNK + 1):
-                rows, _ = self.search_page(cur, chunk_end, page, page_size, event_type_ids, query, query_id, use_cache)
+                rows, _ = self._search_one_page(cur, chunk_end, page, page_size, event_type_ids, query, query_id, use_cache)
                 new = [r for r in rows if r.event_id not in seen]
                 if not rows or not new:
                     break

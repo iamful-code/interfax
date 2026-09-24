@@ -201,17 +201,18 @@ class HttpError(RuntimeError):
         self.headers = dict(headers or {})
 
 
-def _cache_key(method: str, url: str, params: Optional[Mapping], data: Optional[Mapping]) -> str:
-    def _norm(m: Optional[Mapping]) -> str:
+def _cache_key(method: str, url: str, params=None, data=None) -> str:
+    def _norm(m) -> str:
+        """Ключ кеша: принимает и словарь, и список пар (повторяющиеся поля формы)."""
         if not m:
             return ""
+        pairs = m.items() if hasattr(m, "items") else m
         items = []
-        for k in sorted(m):
-            v = m[k]
+        for k, v in pairs:
             if isinstance(v, (list, tuple)):
                 v = "|".join(str(x) for x in v)
             items.append(f"{k}={v}")
-        return "&".join(items)
+        return "&".join(sorted(items))
 
     raw = f"{method.upper()} {url}?{_norm(params)}#{_norm(data)}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()

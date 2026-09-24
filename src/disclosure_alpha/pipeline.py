@@ -77,9 +77,20 @@ def build_universe(settings: Settings, ed: EDisclosureClient, iss=None, limit: O
 
 # ----------------------------------------------------------------------------- сообщения
 def resolve_event_type_ids(ed: EDisclosureClient, taxonomy: Taxonomy, categories: Iterable[str]) -> list[str]:
-    """Идентификаторы чекбоксов формы, чьи подписи попадают в заданные категории таксономии."""
+    """Идентификаторы типов сообщений сайта, чьи названия попадают в заданные категории таксономии.
+
+    Источник -- справочник сайта (api/data/sevent-types); запасной вариант -- чекбоксы формы.
+    """
     wanted = set(categories)
-    ids = []
+    ids: list[str] = []
+    try:
+        for t in ed.fetch_event_types():
+            if taxonomy.classify_name(t.get("name", "")) in wanted:
+                ids.append(str(t["id"]))
+    except Exception as e:  # noqa: BLE001 -- справочник может быть недоступен
+        log.warning("справочник типов сообщений недоступен (%s), берём чекбоксы формы", e)
+    if ids:
+        return ids
     for opt in ed.event_type_options():
         if taxonomy.classify_name(opt.get("label", "")) in wanted:
             ids.append(str(opt["value"]))

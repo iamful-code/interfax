@@ -43,6 +43,11 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._passed():
             return self._send(STUB)
         q = parse_qs(urlparse(self.path).query)
+        if urlparse(self.path).path == "/api/data/sevent-types":
+            return self._send_json('[{"id":52,"name":"Об изменении размера доли участия лиц, входящих в состав '
+                                   'органов управления эмитента, в уставном капитале эмитента"},'
+                                   '{"id":12,"name":"О приобретении эмитентом собственных акций"},'
+                                   '{"id":90,"name":"Присвоение или изменение рейтинга эмитента"}]')
         if urlparse(self.path).path.endswith(".json"):
             data = '{"ok": true, "n": 42}'
             self.send_response(200)
@@ -55,7 +60,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(r"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Поиск</title></head><body>
 <form id="f"><input type="text" name="dateStart" readonly><input type="text" name="dateFinish" readonly>
 <input type="checkbox" name="eventTypeCheckboxGroup" value="52"><input type="checkbox" name="eventTypeCheckboxGroup" value="12">
-<input type="hidden" name="lastPageNumber" value="1"><input type="hidden" name="lastPageSize" value="10">
+<input type="hidden" name="lastPageNumber" value="1"><input type="hidden" name="lastPageSize" value="10"><input type="hidden" name="__RequestVerificationToken" value="TOKEN-XYZ">
 <button type="button" id="sEventSearchForm__button-search">Фильтр типов</button>
 <button type="button" class="button" id="sendButton">Искать</button></form>
 <script src="/src/js/app.js"></script>
@@ -97,11 +102,35 @@ document.getElementById('sendButton').addEventListener('click', function(){
             return self._send(f"<html><body>событие {q['EventId'][0]}</body></html>")
         self._send(REAL)
 
+    def _send_json(self, body: str) -> None:
+        data = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self):  # noqa: N802
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8")
         self.server.hits.append(("POST", self.path, self._passed()))
         if not self._passed():
             return self._send(STUB)
+        if urlparse(self.path).path == "/api/search/sevents":
+            ctype = (self.headers.get("Content-Type") or "").lower()
+            token = self.headers.get("RequestVerificationToken")
+            if "x-www-form-urlencoded" not in ctype or not token:
+                return self._send_json('{"errors":["E001"]}')
+            f = parse_qs(body, keep_blank_values=True)
+            types = "_".join(f.get("eventTypeCheckboxGroup", []))
+            page = (f.get("lastPageNumber") or ["1"])[0]
+            size = int((f.get("lastPageSize") or ["10"])[0])
+            rows = "".join(
+                f'<div class="table__row"><div class="table__cell">24.09.2026 19:5{i % 10}</div>'
+                f'<div class="table__cell"><a href="/portal/company.aspx?id={500 + i}">ПАО Тест {i}</a></div>'
+                f'<div class="table__cell"><a href="/portal/event.aspx?EventId=E{page}-{i}-{types}&q=">'
+                f'Решения совета директоров</a></div></div>'
+                for i in range(min(size, 3 if page != "1" else size)))
+            return self._send(f'<div class="table">{rows}</div>')
         fields = parse_qs(body, keep_blank_values=True)
         summary = ";".join(f"{k}={'|'.join(v)}" for k, v in sorted(fields.items()))
         self._send(RESULTS.format(payload=summary))
@@ -480,3 +509,55 @@ def test_pagination_fields_are_set(transport, server, tmp_path):
         "() => ({page: document.querySelector('input[name=lastPageNumber]').value,"
         " size: document.querySelector('input[name=lastPageSize]').value})")
     assert values == {"page": "3", "size": "100"}
+
+
+def _api_client(transport, server, tmp_path):
+    from disclosure_alpha.config import Settings
+    from disclosure_alpha.edisclosure.client import EDisclosureClient
+
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    return EDisclosureClient(Settings(data_dir=tmp_path / "data", edisclosure_base_url=base), http=transport)
+
+
+def test_search_api_sends_form_payload_with_token(transport, server, tmp_path):
+    """Прямой запрос к поиску: форма с повторяющимися типами, тип содержимого и токен страницы."""
+    client = _api_client(transport, server, tmp_path)
+    rows, html = client.search_api(date(2026, 9, 22), date(2026, 9, 24), event_type_ids=["52", "12"],
+                                   page=1, page_size=100, use_cache=False)
+    assert len(rows) == 100                      # сервер отдал столько, сколько запрошено
+    assert rows[0].company_id == 500
+    assert rows[0].published_at == datetime(2026, 9, 24, 19, 50)
+    assert rows[0].event_id.endswith("52_12")    # оба типа дошли отдельными полями
+    assert "table__row" in html
+
+
+def test_search_api_without_token_is_rejected(transport, server, tmp_path, monkeypatch):
+    """Сайт отвергает запрос без токена формы -- значит мы обязаны его отправлять."""
+    client = _api_client(transport, server, tmp_path)
+    monkeypatch.setattr(transport, "input_value", lambda name: None)
+    rows, html = client.search_api(date(2026, 9, 22), date(2026, 9, 24), use_cache=False)
+    assert rows == [] and "E001" in html
+
+
+def test_iter_search_uses_api_and_paginates(transport, server, tmp_path):
+    """Обход дат в браузерном режиме идёт прямым запросом и останавливается на неполной странице."""
+    client = _api_client(transport, server, tmp_path)
+    transport.open_page(f"http://127.0.0.1:{server.server_address[1]}/poisk-po-soobshheniyam")
+    rows = list(client.iter_search(date(2026, 9, 22), date(2026, 9, 24), chunk_days=3, page_size=100, use_cache=False))
+    assert len(rows) == 103                      # 100 на первой странице и 3 на второй
+    assert len({r.event_id for r in rows}) == 103
+
+
+def test_fetch_event_types_and_category_mapping(transport, server, tmp_path):
+    """Справочник типов сообщений сайта сопоставляется с категориями исследования."""
+    from disclosure_alpha.edisclosure.taxonomy import default_taxonomy
+    from disclosure_alpha.pipeline import resolve_event_type_ids
+
+    client = _api_client(transport, server, tmp_path)
+    types = client.fetch_event_types()
+    assert {t["id"] for t in types} == {"52", "12", "90"}
+    assert (client.settings.processed_dir / "event_types.json").exists()
+
+    ids = resolve_event_type_ids(client, default_taxonomy(), ["insider_stake_change"])
+    assert ids == ["52"]
+    assert resolve_event_type_ids(client, default_taxonomy(), ["buyback"]) == ["12"]

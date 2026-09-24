@@ -55,3 +55,16 @@ URL-подобные строки из скриптов (ajax-эндпоинты
 * Помимо JS-проверки защита может показать капчу с поворотом картинки (скрипты `sp_rotated_captcha/…`).
   Она распознаётся отдельно (`classify_page` -> `captcha`): в видимом окне команда ждёт, пока её пройдёт
   человек, в скрытом -- сразу сообщает, что нужен `--show-browser`. Пройденная капча живёт в профиле браузера.
+
+## Устройство нового сайта (подтверждено на живых данных, сентябрь 2026)
+| Что | Как |
+|---|---|
+| Страница поиска | `/poisk-po-soobshheniyam`, форма `#sEventSearchForm`, кнопка «Искать» `#sendButton`, результаты вставляются в `#searchResults` |
+| Поля формы | `dateStart`, `dateFinish` (ДД.ММ.ГГГГ), `lastPageNumber`, `lastPageSize`, `eventTypeCheckboxGroup` (повторяется), `districtsCheckboxGroup`, `regionsCheckboxGroup`, `branchesCheckboxGroup`, `textfieldCompany` (ИНН/ОГРН/ОКПО), `textfieldEvent`, `query`, `queryEvent`, `radView`, `radReg`, `__RequestVerificationToken` |
+| Поиск (то же, что делает страница) | `POST /api/search/sevents`, тело -- форма (`application/x-www-form-urlencoded`), обязательны заголовок `RequestVerificationToken` и `X-Requested-With: XMLHttpRequest`; без них ответ `{"errors":["E001"]}`. Ответ -- кусок разметки с таблицей результатов |
+| Справочник типов сообщений | `GET /api/data/sevent-types` -> `[{"id":136,"name":"..."}]`, около 300 типов |
+| Вход в личный кабинет | `POST /api/account/login` (нам не нужен) |
+| Адреса сообщений и компаний | прежние: `/portal/event.aspx?EventId=...&q=`, `/portal/company.aspx?id=...` |
+| Размер страницы | по умолчанию 10; `lastPageSize=100` работает |
+
+Значения фильтров «все» кодируются как `-1` (округа, регионы, отрасли), `radReg=FederalDistricts`, `radView=0`.

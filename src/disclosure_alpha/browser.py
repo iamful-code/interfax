@@ -44,6 +44,15 @@ def _is_navigation_error(exc: BaseException) -> bool:
     return any(m in str(exc).lower() for m in _NAVIGATION_ERROR_MARKERS)
 
 
+def _as_pairs(data) -> list:
+    """Параметры формы как список пар: так сохраняются повторяющиеся поля (например, типы сообщений)."""
+    if not data:
+        return []
+    if hasattr(data, "items"):
+        return list(data.items())
+    return list(data)
+
+
 def normal_user_agent(ua: str) -> str:
     """HeadlessChrome в User-Agent -- явный признак робота; подменяем на обычный Chrome."""
     return (ua or "").replace("HeadlessChrome", "Chrome")
@@ -371,7 +380,7 @@ class BrowserTransport:
 
     def _fetch_once(self, method: str, url: str, params: Optional[Mapping], data: Optional[Mapping],
                     headers: Optional[Mapping[str, str]], prefer_fetch: bool = False) -> FetchResult:
-        full = url + (("?" + urlencode(dict(params), doseq=True)) if params else "")
+        full = url + (("?" + urlencode(_as_pairs(params), doseq=True)) if params else "")
         if method.upper() == "GET" and self.navigate_for_get and not prefer_fetch:
             return self._fetch_by_navigation(full)
         return self._fetch_from_page(method, full, data, headers)
@@ -468,7 +477,7 @@ class BrowserTransport:
         req_headers = {k: v for k, v in (headers or {}).items() if k.lower() not in ("referer", "origin", "host")}
         body = None
         if method.upper() != "GET":
-            body = urlencode(dict(data or {}), doseq=True)
+            body = urlencode(_as_pairs(data), doseq=True)
             req_headers.setdefault("content-type", FORM_CONTENT_TYPE)
         result = self._page.evaluate(self._FETCH_SCRIPT, {"method": method.upper(), "url": url,
                                                           "body": body, "headers": req_headers})
@@ -667,15 +676,28 @@ class BrowserTransport:
             if method == "GET":
                 return self.request("GET", url, prefer_fetch=True, use_cache=False)
             body = rec.get("post_data") or ""
-            headers = {"content-type": "application/json"} if body.strip().startswith(("{", "[")) else None
+            headers = {"content-type": "application/json" if body.strip().startswith(("{", "["))
+                       else FORM_CONTENT_TYPE, "x-requested-with": "XMLHttpRequest"}
+            token = self.input_value("__RequestVerificationToken")
+            if token:
+                headers["RequestVerificationToken"] = token
             self._ensure_same_origin(url)
             result = self._page.evaluate(self._FETCH_SCRIPT, {"method": method, "url": url, "body": body,
-                                                              "headers": headers or {}})
+                                                              "headers": headers})
             text = result.get("text") or ""
             return FetchResult(url=result.get("url") or url, status=int(result.get("status", 0)),
                                content=text.encode("utf-8"), headers=dict(result.get("headers") or {}), encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
             log.debug("повтор запроса не удался: %s", exc)
+            return None
+
+    def input_value(self, name: str) -> Optional[str]:
+        """Значение поля страницы по имени (нужен токен формы __RequestVerificationToken)."""
+        self._ensure_started()
+        try:
+            return self._page.evaluate(
+                "(n) => { const e = document.querySelector(`[name=\"${n}\"]`); return e ? e.value : null; }", name)
+        except Exception:  # noqa: BLE001
             return None
 
     def field_names(self) -> list[str]:
