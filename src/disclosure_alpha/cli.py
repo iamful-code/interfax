@@ -29,8 +29,19 @@ def cmd_discover(args):
     client = EDisclosureClient(settings)
     summary = client.discover(Path(args.out) if args.out else None)
     print("Сохранено:", settings.discovery_dir if not args.out else args.out)
+    print(f"  User-Agent: {summary.get('user_agent')}; cookies загружено: {summary.get('cookies_loaded', 0)}")
     for name, page in summary["pages"].items():
-        print(f"  {name}: {page.get('status')}")
+        line = f"  {name}: {page.get('status')}"
+        if page.get("error_file"):
+            line += f" -> страница ошибки: {page['error_file']}"
+        print(line)
+        if page.get("headers"):
+            print(f"      заголовки: {page['headers']}")
+        alt = page.get("alternate_host")
+        if alt:
+            print(f"      альтернативный хост {alt.get('base_url')}: {alt.get('status')}")
+    for h in summary.get("hints", []):
+        print(f"  ! {h}")
     form = summary["pages"].get("search", {}).get("form")
     if form:
         print(f"  форма: method={form['method']} action={form['action']} полей={len(form['fields'])} "

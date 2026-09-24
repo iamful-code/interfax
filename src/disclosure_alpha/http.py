@@ -6,18 +6,79 @@
 from __future__ import annotations
 
 import hashlib
+import http.cookiejar
 import json
 import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
+from urllib.parse import urlsplit
 
 import requests
 
 log = logging.getLogger(__name__)
 
 RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+# Заголовки «как у браузера»: часть защит отсекает клиентов с минимальным набором заголовков.
+BROWSER_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+}
+
+
+def decode_body(content: bytes, encoding: Optional[str]) -> str:
+    """Декодирование ответа: объявленная кодировка, затем utf-8; latin-1 (догадка requests) -- в последнюю очередь."""
+    declared = (encoding or "").lower()
+    order: list[str] = []
+    if declared and declared not in ("iso-8859-1", "latin-1", "latin1"):
+        order.append(declared)
+    order.append("utf-8")
+    for enc in order:
+        try:
+            return content.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return content.decode("cp1251", errors="replace") if b"\xd0" not in content[:2000] else content.decode("utf-8", errors="replace")
+
+
+def load_cookies(session: requests.Session, path: Path, default_domain: str = "e-disclosure.ru") -> int:
+    """Загружает cookies из файла: формат Netscape (cookies.txt) или одна строка заголовка Cookie.
+
+    Возвращает число загруженных cookies. Строка вида ``a=1; b=2`` (например, скопированная из DevTools)
+    привязывается к default_domain и его поддоменам.
+    """
+    path = Path(path)
+    text = path.read_text("utf-8", errors="replace").strip()
+    if not text:
+        return 0
+    if text.startswith("# Netscape") or text.startswith("# HTTP Cookie File") or "\t" in text.splitlines()[0]:
+        jar = http.cookiejar.MozillaCookieJar(str(path))
+        jar.load(ignore_discard=True, ignore_expires=True)
+        n = 0
+        for c in jar:
+            session.cookies.set_cookie(c)
+            n += 1
+        return n
+    n = 0
+    for part in text.split(";"):
+        if "=" not in part:
+            continue
+        name, value = part.strip().split("=", 1)
+        if not name:
+            continue
+        session.cookies.set(name.strip(), value.strip(), domain="." + default_domain.lstrip("."), path="/")
+        n += 1
+    return n
 
 
 @dataclass
@@ -31,11 +92,7 @@ class FetchResult:
 
     @property
     def text(self) -> str:
-        enc = self.encoding or "utf-8"
-        try:
-            return self.content.decode(enc)
-        except (UnicodeDecodeError, LookupError):
-            return self.content.decode("utf-8", errors="replace")
+        return decode_body(self.content, self.encoding)
 
     def json(self) -> Any:
         return json.loads(self.text)
@@ -46,10 +103,12 @@ class FetchResult:
 
 
 class HttpError(RuntimeError):
-    def __init__(self, url: str, status: int, message: str = ""):
+    def __init__(self, url: str, status: int, message: str = "", body: str = "", headers: Optional[Mapping[str, str]] = None):
         super().__init__(f"HTTP {status} for {url} {message}".strip())
         self.url = url
         self.status = status
+        self.body = body            # полное тело ответа (для диагностики защиты/техработ)
+        self.headers = dict(headers or {})
 
 
 def _cache_key(method: str, url: str, params: Optional[Mapping], data: Optional[Mapping]) -> str:
@@ -88,6 +147,8 @@ class HttpClient:
         cache_ttl_sec: Optional[float] = None,
         session: Optional[requests.Session] = None,
         extra_headers: Optional[Mapping[str, str]] = None,
+        cookies_file: Optional[Path] = None,
+        browser_headers: bool = True,
     ):
         self.min_interval_sec = min_interval_sec
         self.timeout_sec = timeout_sec
@@ -95,9 +156,18 @@ class HttpClient:
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.cache_ttl_sec = cache_ttl_sec
         self.session = session or requests.Session()
-        self.session.headers.update({"User-Agent": user_agent, "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5"})
+        if browser_headers:
+            self.session.headers.update(BROWSER_HEADERS)
+        self.session.headers.update({"User-Agent": user_agent})
         if extra_headers:
             self.session.headers.update(dict(extra_headers))
+        self.cookies_loaded = 0
+        if cookies_file and Path(cookies_file).exists():
+            try:
+                self.cookies_loaded = load_cookies(self.session, Path(cookies_file))
+                log.info("загружено cookies из %s: %d", cookies_file, self.cookies_loaded)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("не удалось загрузить cookies из %s: %s", cookies_file, exc)
         self._last_request_ts = 0.0
         self.stats = {"requests": 0, "cache_hits": 0, "retries": 0}
 
@@ -186,7 +256,8 @@ class HttpClient:
                 headers={k: v for k, v in resp.headers.items()}, encoding=resp.encoding,
             )
             if not res.ok:
-                raise HttpError(url, res.status, (resp.text or "")[:200].replace("\n", " "))
+                body = res.text
+                raise HttpError(url, res.status, body[:120].replace("\n", " ").strip(), body=body, headers=res.headers)
             if use_cache:
                 self._cache_put(key, res)
             return res

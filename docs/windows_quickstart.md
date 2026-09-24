@@ -107,7 +107,29 @@ disclosure-alpha backtest --hold-days 20 --split-date 2022-01-01   # страт�
 | `Activate.ps1 cannot be loaded because running scripts is disabled` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, затем повторить активацию; либо использовать `cmd` и `.venv\Scripts\activate.bat` |
 | `disclosure-alpha : The term ... is not recognized` | Не активировано окружение (`.venv\Scripts\Activate.ps1`) или установка не прошла (`pip install -e ".[dev]"`) |
 | `HTTP 403` от e-disclosure | Гео-блокировка: запускать из РФ или через прокси (`$env:HTTPS_PROXY`) |
+| `HTTP 503` с HTML-страницей (в `discover` все страницы `error: HTTP 503`) | Либо техработы, либо антибот-защита. 1) Откройте https://e-disclosure.ru/poisk-po-soobshheniyam в браузере: если не открывается — техработы, повторите позже. 2) Если открывается — это защита от ботов: см. раздел «Cookies браузера» ниже. `discover` сохраняет страницу ошибки в `data\discovery\search_page_error.html` и печатает вердикт (`! search: HTTP 503; признаки: ...`) — пришлите его разработчику, если шаги ниже не помогли |
 | `HTTP 429` / соединения рвутся | Сайт ограничивает частоту: увеличьте `DA_EDISCLOSURE_MIN_INTERVAL` до 3-5 и запустите снова — прогресс сохранён |
 | Кракозябры в консоли | Шаг 3 (`chcp 65001`, `PYTHONUTF8=1`) |
 | `сообщений нет -- сначала выполните сбор` | Не выполнен шаг 7.2 или он ничего не нашёл — проверьте `discovery.json` и `config\edisclosure_form.json` |
 | В `events.parquet` мало строк | Компании не сопоставились с MOEX по ИНН: посмотрите `data\processed\companies.parquet` (ИНН должен быть заполнен) и `mapping.parquet` |
+
+## Cookies браузера (обход антибот-проверки)
+Если сайт открывается в браузере, но скрипту отвечает 503/403 с HTML-страницей, сайт проверяет браузер
+и выдаёт cookie после проверки. Передайте эти cookie скрипту:
+
+1. Откройте https://e-disclosure.ru/poisk-po-soobshheniyam в Chrome/Edge, дождитесь загрузки.
+2. Нажмите F12 → вкладка **Network** → обновите страницу (F5) → кликните первый запрос
+   (`poisk-po-soobshheniyam`) → справа **Headers** → раздел **Request Headers** → строка `Cookie:`.
+   Скопируйте её значение целиком (всё после `Cookie:`).
+3. Сохраните в файл `config\cookies.txt` одной строкой (например, `notepad config\cookies.txt`).
+   Подойдёт и файл в формате Netscape `cookies.txt` из расширения «Get cookies.txt LOCALLY».
+4. Там же в Request Headers скопируйте `User-Agent` и задайте его скрипту тем же, что у браузера
+   (защита часто привязывает cookie к User-Agent):
+   ```powershell
+   $env:DA_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+   ```
+5. Повторите `disclosure-alpha discover`. В выводе должно быть `cookies загружено: N` и `search: ok`.
+
+Cookie проверки живут ограниченное время (часы–дни); если 503 вернулся — повторите шаги 1–3.
+Если `discover` сообщает, что отвечает только хост с `www.`, задайте
+`$env:DA_EDISCLOSURE_BASE_URL = "https://www.e-disclosure.ru"`.

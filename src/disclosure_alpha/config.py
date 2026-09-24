@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -35,8 +36,11 @@ class Settings:
     # --- HTTP ---
     user_agent: str = field(default_factory=lambda: _env(
         "USER_AGENT",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 disclosure-alpha/0.1",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
     ))
+    # cookies браузера для обхода антибот-проверки: файл cookies.txt (Netscape) или строка заголовка Cookie
+    cookies_file: Optional[Path] = field(default_factory=lambda: (
+        Path(os.environ["DA_COOKIES_FILE"]) if os.environ.get("DA_COOKIES_FILE") else PROJECT_ROOT / "config" / "cookies.txt"))
     timeout_sec: float = field(default_factory=lambda: float(_env("TIMEOUT", "60")))
     max_retries: int = field(default_factory=lambda: int(_env("MAX_RETRIES", "4")))
 

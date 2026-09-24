@@ -36,7 +36,10 @@ class FakeSession:
     """
 
     def __init__(self, rules):
+        import requests
+
         self.headers: dict = {}
+        self.cookies = requests.cookies.RequestsCookieJar()
         self.rules = rules
         self.calls: list[dict] = []
 

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from ..config import Settings, load_settings
 from ..http import HttpClient, HttpError
@@ -57,6 +59,7 @@ class EDisclosureClient:
             timeout_sec=self.settings.timeout_sec,
             max_retries=self.settings.max_retries,
             cache_dir=self.settings.cache_dir / "edisclosure",
+            cookies_file=self.settings.cookies_file,
         )
         self.field_map = dict(FIELD_MAP)
         cfg = form_config_path or (self.settings.config_dir / "edisclosure_form.json")
@@ -90,64 +93,99 @@ class EDisclosureClient:
         return form.event_type_options() if form else []
 
     # ------------------------------------------------------------------ discover
-    def discover(self, out_dir: Optional[Path] = None, sample_event: bool = True) -> dict:
-        """Скачивает ключевые страницы, сохраняет HTML и сводку структуры (формы, ссылки, ajax-эндпоинты)."""
+    def _probe(self, name: str, url: str, out_dir: Path, params: Optional[dict] = None) -> tuple[Optional[str], dict]:
+        """GET страницы для discover: при ошибке сохраняет тело/заголовки ответа и описывает причину."""
+        try:
+            res = self.http.get(url, params=params, use_cache=False)
+            (out_dir / f"{name}.html").write_text(res.text, "utf-8")
+            return res.text, {"status": "ok", "http_status": res.status, "url": res.url}
+        except HttpError as e:
+            info: dict = {"status": f"error: HTTP {e.status}", "http_status": e.status, "url": url}
+            if e.body:
+                (out_dir / f"{name}_error.html").write_text(e.body, "utf-8")
+                info["error_file"] = str(out_dir / f"{name}_error.html")
+                info["body_head"] = parsers.clean_text(parsers.soup_of(e.body).get_text(" "))[:400]
+            keep = ("server", "retry-after", "set-cookie", "content-type", "cf-ray", "x-powered-by", "via", "location")
+            info["headers"] = {k: v for k, v in e.headers.items() if k.lower() in keep}
+            info["diagnosis"] = diagnose_block(e.status, e.body or "", e.headers)
+            return None, info
+
+    def discover(self, out_dir: Optional[Path] = None, sample_event: bool = True, quick: bool = True) -> dict:
+        """Скачивает ключевые страницы, сохраняет HTML и сводку структуры (формы, ссылки, ajax-эндпоинты).
+
+        При ошибках (403/503 -- защита или техработы) сохраняет страницу ошибки, определяет тип защиты и
+        пробует альтернативный хост (с/без www.). ``quick`` -- не ждать долгих повторов (1 повтор вместо 4).
+        """
         out_dir = Path(out_dir or self.settings.discovery_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        summary: dict = {"base_url": self.base_url, "fetched_at": datetime.now().isoformat(timespec="seconds"), "pages": {}}
-
-        def _save(name: str, html: str) -> None:
-            (out_dir / f"{name}.html").write_text(html, "utf-8")
-
-        # 1. страница поиска и форма
+        summary: dict = {"base_url": self.base_url, "user_agent": self.http.session.headers.get("User-Agent"),
+                         "cookies_loaded": getattr(self.http, "cookies_loaded", 0),
+                         "fetched_at": datetime.now().isoformat(timespec="seconds"), "pages": {}, "hints": []}
+        prev_retries = self.http.max_retries
+        if quick:
+            self.http.max_retries = 1
         try:
-            form = self._load_search_form(force=True)
-            _save("search_page", self._search_html or "")
-            page_info = {"status": "ok", "links_portal": parsers.find_links(self._search_html or "", self.base_url, r"/portal/|poisk"),
-                         "script_endpoints": parsers.find_script_endpoints(self._search_html or "")}
-            if form:
-                page_info["form"] = {"action": form.action, "method": form.method, "fields": form.fields,
-                                     "checkbox_groups": {k: v[:200] for k, v in form.checkbox_groups.items()},
-                                     "radio_groups": form.radio_groups, "selects": form.selects,
-                                     "event_type_options": form.event_type_options()[:300]}
-            summary["pages"]["search"] = page_info
-        except HttpError as e:
-            summary["pages"]["search"] = {"status": f"error: {e}"}
+            # 1. страница поиска и форма (при неудаче -- альтернативный хост)
+            html, info = self._probe("search_page", self.url(SEARCH_PATH), out_dir)
+            if html is None:
+                alt = alternate_host(self.base_url)
+                alt_html, alt_info = self._probe("search_page_althost", alt + SEARCH_PATH, out_dir)
+                info["alternate_host"] = {"base_url": alt, **alt_info}
+                if alt_html is not None:
+                    summary["hints"].append(f"Хост {alt} отвечает, а {self.base_url} -- нет: задайте DA_EDISCLOSURE_BASE_URL={alt}")
+                    html = alt_html
+            if html is not None:
+                self._search_html = html
+                form = parsers.parse_search_form(html, self.base_url)
+                self._form = form
+                info["links_portal"] = parsers.find_links(html, self.base_url, r"/portal/|poisk")
+                info["script_endpoints"] = parsers.find_script_endpoints(html)
+                if form:
+                    info["form"] = {"action": form.action, "method": form.method, "fields": form.fields,
+                                    "checkbox_groups": {k: v[:200] for k, v in form.checkbox_groups.items()},
+                                    "radio_groups": form.radio_groups, "selects": form.selects,
+                                    "event_type_options": form.event_type_options()[:300]}
+                else:
+                    summary["hints"].append("На странице поиска не найдена форма -- вероятно, она строится скриптом; пришлите search_page.html")
+            summary["pages"]["search"] = info
 
-        # 2. лента последних сообщений
-        rows: list[MessageRow] = []
-        try:
-            res = self.http.get(self.url(LASTNEWS_PATH), use_cache=False)
-            _save("lastnews", res.text)
-            rows = parsers.parse_lastnews(res.text, self.base_url)
-            summary["pages"]["lastnews"] = {"status": "ok", "rows_parsed": len(rows),
-                                            "sample": [r.to_dict() for r in rows[:5]],
-                                            "script_endpoints": parsers.find_script_endpoints(res.text)}
-        except HttpError as e:
-            summary["pages"]["lastnews"] = {"status": f"error: {e}"}
+            # 2. лента последних сообщений
+            rows: list[MessageRow] = []
+            html, info = self._probe("lastnews", self.url(LASTNEWS_PATH), out_dir)
+            if html is not None:
+                rows = parsers.parse_lastnews(html, self.base_url)
+                info.update({"rows_parsed": len(rows), "sample": [r.to_dict() for r in rows[:5]],
+                             "script_endpoints": parsers.find_script_endpoints(html)})
+            summary["pages"]["lastnews"] = info
 
-        # 3. пример события и компании
-        if sample_event and rows:
-            r0 = rows[0]
-            try:
-                ev_html = self.http.get(self.url(EVENT_PATH), params={"EventId": r0.event_id}, use_cache=False).text
-                _save("event_sample", ev_html)
-                ev = parsers.parse_event_page(ev_html, r0.event_id)
-                summary["pages"]["event"] = {"status": "ok", "event_id": r0.event_id, "parsed": {
-                    "title": ev.title, "company_id": ev.company_id, "company_name": ev.company_name,
-                    "published_at": ev.published_at.isoformat() if ev.published_at else None,
-                    "event_type": ev.event_type, "body_len": len(ev.body_text), "body_head": ev.body_text[:800]}}
-                cid = ev.company_id or r0.company_id
-                if cid:
-                    c_html = self.http.get(self.url(COMPANY_PATH), params={"id": cid}, use_cache=False).text
-                    _save("company_sample", c_html)
-                    ci = parsers.parse_company_page(c_html, cid)
-                    summary["pages"]["company"] = {"status": "ok", "parsed": ci.to_dict(),
-                                                   "links_portal": parsers.find_links(c_html, self.base_url, r"/portal/")[:100],
-                                                   "script_endpoints": parsers.find_script_endpoints(c_html)}
-            except HttpError as e:
-                summary["pages"]["event"] = {"status": f"error: {e}"}
+            # 3. пример события и компании
+            if sample_event and rows:
+                r0 = rows[0]
+                ev_html, info = self._probe("event_sample", self.url(EVENT_PATH), out_dir, params={"EventId": r0.event_id})
+                if ev_html is not None:
+                    ev = parsers.parse_event_page(ev_html, r0.event_id)
+                    info.update({"event_id": r0.event_id, "parsed": {
+                        "title": ev.title, "company_id": ev.company_id, "company_name": ev.company_name,
+                        "published_at": ev.published_at.isoformat() if ev.published_at else None,
+                        "event_type": ev.event_type, "body_len": len(ev.body_text), "body_head": ev.body_text[:800]}})
+                    cid = ev.company_id or r0.company_id
+                    if cid:
+                        c_html, c_info = self._probe("company_sample", self.url(COMPANY_PATH), out_dir, params={"id": cid})
+                        if c_html is not None:
+                            ci = parsers.parse_company_page(c_html, cid)
+                            c_info.update({"parsed": ci.to_dict(),
+                                           "links_portal": parsers.find_links(c_html, self.base_url, r"/portal/")[:100],
+                                           "script_endpoints": parsers.find_script_endpoints(c_html)})
+                        summary["pages"]["company"] = c_info
+                summary["pages"]["event"] = info
+        finally:
+            self.http.max_retries = prev_retries
 
+        for name, page in summary["pages"].items():
+            diag = page.get("diagnosis")
+            if diag:
+                summary["hints"].append(f"{name}: {diag}")
+        summary["hints"] = list(dict.fromkeys(summary["hints"]))
         (out_dir / "discovery.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), "utf-8")
         log.info("discovery сохранён в %s", out_dir)
         return summary
@@ -264,3 +302,43 @@ class EDisclosureClient:
             out.append(CompanyInfo(company_id=cid, name=parsers.clean_text(a.get_text(" ")),
                                    inn=inn.group(1) if inn else (digits.group(1) if digits else None)))
         return out
+
+
+def alternate_host(base_url: str) -> str:
+    """https://e-disclosure.ru <-> https://www.e-disclosure.ru"""
+    parts = urlsplit(base_url)
+    host = parts.netloc[4:] if parts.netloc.startswith("www.") else "www." + parts.netloc
+    return urlunsplit((parts.scheme, host, "", "", ""))
+
+
+_PROTECTION_MARKERS = [
+    (r"ddos-guard|__ddg", "DDoS-Guard (JS-проверка браузера)"),
+    (r"qrator", "Qrator (антибот-проверка)"),
+    (r"variti", "Variti (антибот-проверка)"),
+    (r"servicepipe", "Servicepipe (антибот-проверка)"),
+    (r"cloudflare|cf-ray|cf_chl", "Cloudflare (проверка браузера)"),
+    (r"captcha", "капча"),
+    (r"технические работы|техническ\S+ работ|maintenance|временно недоступен", "техработы / сервис временно недоступен"),
+    (r"слишком много запросов|too many requests|превышен", "ограничение частоты запросов"),
+    (r"document\.cookie|setcookie|challenge", "JS-проверка, выставляющая cookie"),
+]
+
+
+def diagnose_block(status: int, body: str, headers: Optional[dict] = None) -> str:
+    """Короткий вердикт по ответу с ошибкой: тип защиты / техработы / гео-блок и что делать."""
+    headers = {k.lower(): v for k, v in (headers or {}).items()}
+    text = (body or "")[:200_000].lower() + " " + " ".join(f"{k}: {v}".lower() for k, v in headers.items())
+    found = [label for pat, label in _PROTECTION_MARKERS if re.search(pat, text)]
+    parts = [f"HTTP {status}"]
+    if found:
+        parts.append("признаки: " + ", ".join(dict.fromkeys(found)))
+    if headers.get("retry-after"):
+        parts.append(f"Retry-After={headers['retry-after']}")
+    if "set-cookie" in headers:
+        parts.append("сервер ставит cookie")
+    if status == 403 and not found:
+        parts.append("возможна гео-блокировка (нужен российский IP)")
+    if status in (403, 503):
+        parts.append("если сайт открывается в браузере -- сохраните cookies браузера в config/cookies.txt и "
+                     "задайте DA_USER_AGENT как в браузере; иначе это техработы, повторите позже")
+    return "; ".join(parts)

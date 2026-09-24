@@ -109,3 +109,32 @@ def test_field_map_override_from_config(tmp_path):
     client2.search_page(date(2024, 1, 1), date(2024, 1, 2))
     post = [c for c in session.calls if c["method"] == "POST"][-1]
     assert post["data"]["df"] == "01.01.2024" and post["data"]["dt"] == "02.01.2024"
+
+
+def test_discover_captures_error_pages_and_tries_alternate_host(tmp_path):
+    blocked = "<html><head><title>Интерфакс – Сервер раскрытия информации</title></head><body><script>document.cookie='__ddg1_=1'</script></body></html>"
+
+    def search_get(m, url, p, d):
+        return (200, read_fixture("edisclosure_search_page.html")) if "://www." in url else (503, blocked)
+
+    rules = [
+        (lambda m, url, p, d: m == "GET" and url.endswith("/poisk-po-soobshheniyam"), search_get),
+        (lambda m, url, p, d: url.endswith("/portal/lastnews.aspx"), lambda *a: (503, blocked)),
+    ]
+    client, session = _client(tmp_path, rules)
+    client.http.max_retries = 4
+    out = tmp_path / "disc"
+    summary = client.discover(out)
+    assert client.http.max_retries == 4  # quick-режим восстанавливает настройку
+    search = summary["pages"]["search"]
+    assert search["status"] == "error: HTTP 503"
+    assert (out / "search_page_error.html").exists() and "document.cookie" in (out / "search_page_error.html").read_text("utf-8")
+    assert "JS-проверка" in search["diagnosis"] or "DDoS-Guard" in search["diagnosis"]
+    assert search["alternate_host"]["status"] == "ok" and search["alternate_host"]["base_url"] == "https://www.e-disclosure.ru"
+    assert "form" in search and search["form"]["method"] == "post"   # форма разобрана с альтернативного хоста
+    assert any("DA_EDISCLOSURE_BASE_URL=https://www.e-disclosure.ru" in h for h in summary["hints"])
+    assert summary["pages"]["lastnews"]["status"] == "error: HTTP 503"
+    assert "event" not in summary["pages"]
+    # в quick-режиме на 503 делается не больше одного повтора на URL
+    calls_503 = [c for c in session.calls if c["url"].startswith("https://e-disclosure.ru/poisk")]
+    assert len(calls_503) == 2
