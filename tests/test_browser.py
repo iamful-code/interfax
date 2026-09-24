@@ -50,6 +50,12 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data.encode("utf-8"))
             return
+        if urlparse(self.path).path == "/spa":
+            return self._send("""<!DOCTYPE html><html><head><meta charset="utf-8"><title>SPA</title></head>
+<body><div id="app"></div><script>setTimeout(function(){
+  document.getElementById('app').innerHTML =
+    '<form action="/poisk" method="post"><input type="text" name="dateStart"><input type="checkbox" name="eventTypeCheckboxGroup" value="52"></form>';
+}, 400);</script></body></html>""")
         if "EventId" in q:
             return self._send(f"<html><body>событие {q['EventId'][0]}</body></html>")
         self._send(REAL)
@@ -201,3 +207,15 @@ def test_safe_content_reraises_real_errors():
     tr._page = _Broken(PwError)
     with pytest.raises(PwError):
         tr._safe_content()
+
+
+def test_navigation_captures_js_rendered_content(transport, server):
+    """Содержимое, дорисованное скриптом после загрузки, тоже попадает в результат."""
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    res = transport.get(base + "/spa", use_cache=False)
+    assert 'name="dateStart"' in res.text          # формы не было в исходном HTML
+    from disclosure_alpha.edisclosure.parsers import parse_search_form
+
+    spec = parse_search_form(res.text, base)
+    assert spec is not None and "dateStart" in spec.fields
+    assert "eventTypeCheckboxGroup" in spec.checkbox_groups

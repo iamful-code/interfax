@@ -68,6 +68,7 @@ class EDisclosureClient:
                 stub_detector=is_protection_stub,
                 warmup_timeout_sec=self.settings.browser_warmup_timeout_sec,
                 navigate_for_get=self.settings.browser_navigate_get,
+                settle_ms=self.settings.browser_settle_ms,
             )
         self.http = http or HttpClient(
             min_interval_sec=self.settings.edisclosure_min_interval_sec,
@@ -179,8 +180,8 @@ class EDisclosureClient:
                 self._search_html = html
                 form = parsers.parse_search_form(html, self.base_url)
                 self._form = form
+                info["dom"] = parsers.describe_dom(html)
                 info["links_portal"] = parsers.find_links(html, self.base_url, r"/portal/|poisk")
-                info["script_endpoints"] = parsers.find_script_endpoints(html)
                 if form:
                     info["form"] = {"action": form.action, "method": form.method, "fields": form.fields,
                                     "checkbox_groups": {k: v[:200] for k, v in form.checkbox_groups.items()},
@@ -196,7 +197,7 @@ class EDisclosureClient:
             if html is not None:
                 rows = parsers.parse_lastnews(html, self.base_url)
                 info.update({"rows_parsed": len(rows), "sample": [r.to_dict() for r in rows[:5]],
-                             "script_endpoints": parsers.find_script_endpoints(html)})
+                             "dom": parsers.describe_dom(html)})
             summary["pages"]["lastnews"] = info
 
             # 3. пример события и компании
@@ -204,6 +205,7 @@ class EDisclosureClient:
                 r0 = rows[0]
                 ev_html, info = self._probe("event_sample", self.url(EVENT_PATH), out_dir, params={"EventId": r0.event_id})
                 if ev_html is not None:
+                    info["dom"] = parsers.describe_dom(ev_html)
                     ev = parsers.parse_event_page(ev_html, r0.event_id)
                     info.update({"event_id": r0.event_id, "parsed": {
                         "title": ev.title, "company_id": ev.company_id, "company_name": ev.company_name,
@@ -214,9 +216,8 @@ class EDisclosureClient:
                         c_html, c_info = self._probe("company_sample", self.url(COMPANY_PATH), out_dir, params={"id": cid})
                         if c_html is not None:
                             ci = parsers.parse_company_page(c_html, cid)
-                            c_info.update({"parsed": ci.to_dict(),
-                                           "links_portal": parsers.find_links(c_html, self.base_url, r"/portal/")[:100],
-                                           "script_endpoints": parsers.find_script_endpoints(c_html)})
+                            c_info.update({"parsed": ci.to_dict(), "dom": parsers.describe_dom(c_html),
+                                           "links_portal": parsers.find_links(c_html, self.base_url, r"/portal/")[:100]})
                         summary["pages"]["company"] = c_info
                 summary["pages"]["event"] = info
         finally:

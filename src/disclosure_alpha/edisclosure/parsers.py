@@ -358,3 +358,75 @@ def find_script_endpoints(html: str) -> list[str]:
             if keywords.search(cand) and cand not in found:
                 found.append(cand)
     return found
+
+
+def describe_dom(html: str, max_items: int = 40) -> dict:
+    """Структурная сводка страницы: формы, поля, ссылки, идентификаторы, классы, адреса скриптов.
+
+    Нужна для диагностики без пересылки самого HTML (в нём бывает обфусцированный сторонний код).
+    Текст и содержимое скриптов не включаются -- только структура.
+    """
+    soup = soup_of(html)
+    title = clean_text(soup.title.get_text()) if soup.title else ""
+    for t in soup.find_all(("style", "noscript")):
+        t.decompose()
+
+    forms = []
+    for f in soup.find_all("form"):
+        fields = []
+        for inp in f.find_all(["input", "select", "textarea"]):
+            fields.append({"tag": inp.name, "type": (inp.get("type") or "").lower() or None,
+                           "name": inp.get("name"), "id": inp.get("id")})
+        forms.append({"action": f.get("action"), "method": (f.get("method") or "get").lower(),
+                      "id": f.get("id"), "class": " ".join(f.get("class") or []),
+                      "n_fields": len(fields), "fields": fields[:max_items]})
+
+    inputs_outside = []
+    for inp in soup.find_all(["input", "select", "textarea"]):
+        if inp.find_parent("form") is None:
+            inputs_outside.append({"tag": inp.name, "type": (inp.get("type") or "").lower() or None,
+                                   "name": inp.get("name"), "id": inp.get("id"),
+                                   "placeholder": inp.get("placeholder"),
+                                   "class": " ".join(inp.get("class") or [])})
+
+    selects = []
+    for sel in soup.find_all("select"):
+        opts = sel.find_all("option")
+        selects.append({"name": sel.get("name"), "id": sel.get("id"), "n_options": len(opts),
+                        "options_head": [clean_text(o.get_text())[:80] for o in opts[:10]]})
+
+    anchors = []
+    for a in soup.find_all("a", href=True):
+        anchors.append({"href": a["href"][:200], "text": clean_text(a.get_text(" "))[:80]})
+
+    classes: dict[str, int] = {}
+    for el in soup.find_all(class_=True):
+        for c in el.get("class") or []:
+            classes[c] = classes.get(c, 0) + 1
+    ids = [el.get("id") for el in soup.find_all(id=True)][:max_items * 2]
+
+    buttons = [{"tag": b.name, "id": b.get("id"), "type": (b.get("type") or "").lower() or None,
+                "text": clean_text(b.get_text(" "))[:60] or b.get("value"),
+                "class": " ".join(b.get("class") or [])}
+               for b in soup.find_all(["button", "input"]) if b.name == "button" or (b.get("type") or "").lower() in ("submit", "button")]
+
+    return {
+        "title": title,
+        "counts": {"forms": len(soup.find_all("form")), "inputs": len(soup.find_all("input")),
+                   "selects": len(soup.find_all("select")), "textareas": len(soup.find_all("textarea")),
+                   "anchors": len(soup.find_all("a", href=True)), "tables": len(soup.find_all("table")),
+                   "rows": len(soup.find_all("tr")), "scripts": len(soup.find_all("script")),
+                   "iframes": len(soup.find_all("iframe")), "html_len": len(html)},
+        "forms": forms[:10],
+        "inputs_outside_forms": inputs_outside[:max_items],
+        "selects": selects[:max_items],
+        "buttons": buttons[:max_items],
+        "anchors_sample": anchors[:max_items],
+        "event_links": [a["href"] for a in anchors if EVENT_ID_RE.search(a["href"])][:10],
+        "company_links": [a["href"] for a in anchors if COMPANY_ID_RE.search(a["href"])][:10],
+        "ids": [i for i in ids if i],
+        "top_classes": sorted(classes.items(), key=lambda kv: -kv[1])[:max_items],
+        "script_srcs": [sc.get("src") for sc in soup.find_all("script", src=True)][:max_items],
+        "script_endpoints": find_script_endpoints(html)[:max_items],
+        "has_date_placeholder": bool(re.search(r"дата|date|дд\.мм", html, re.I)),
+    }

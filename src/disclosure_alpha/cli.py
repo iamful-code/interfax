@@ -50,6 +50,24 @@ def cmd_discover(args):
         print(line)
         if page.get("headers"):
             print(f"      заголовки: {page['headers']}")
+        dom = page.get("dom")
+        if dom:
+            c = dom["counts"]
+            print(f"      заголовок: {dom['title'][:70]!r}")
+            print(f"      структура: форм={c['forms']} полей={c['inputs']} селектов={c['selects']} "
+                  f"ссылок={c['anchors']} таблиц={c['tables']} строк={c['rows']} скриптов={c['scripts']} "
+                  f"iframe={c['iframes']} размер={c['html_len']}")
+            if dom["forms"]:
+                for f in dom["forms"][:3]:
+                    names = [x["name"] for x in f["fields"] if x["name"]]
+                    print(f"      форма: action={f['action']} method={f['method']} полей={f['n_fields']} "
+                          f"имена={names[:12]}")
+            elif dom["inputs_outside_forms"]:
+                print(f"      поля вне форм: {[x.get('name') or x.get('id') or x.get('placeholder') for x in dom['inputs_outside_forms'][:12]]}")
+            if dom["script_srcs"]:
+                print(f"      скрипты: {dom['script_srcs'][:5]}")
+            if dom["event_links"]:
+                print(f"      ссылки на события: {dom['event_links'][:3]}")
         alt = page.get("alternate_host")
         if alt:
             print(f"      альтернативный хост {alt.get('base_url')}: {alt.get('status')}")

@@ -119,6 +119,7 @@ class BrowserTransport:
         stub_detector: Optional[Callable[[str], bool]] = None,
         warmup_timeout_sec: float = DEFAULT_WARMUP_TIMEOUT_SEC,
         navigate_for_get: bool = True,
+        settle_ms: int = 1500,
     ):
         self.warmup_url = warmup_url
         self.min_interval_sec = min_interval_sec
@@ -134,6 +135,8 @@ class BrowserTransport:
         self.warmup_timeout_sec = warmup_timeout_sec
         # GET выполняем настоящей навигацией: защита отличает переход по ссылке от программного запроса
         self.navigate_for_get = navigate_for_get
+        # пауза после загрузки: даём странице дорисовать содержимое скриптом
+        self.settle_ms = settle_ms
 
         self._pw = None
         self._browser = None
@@ -234,6 +237,7 @@ class BrowserTransport:
         while time.time() < deadline:
             html = self._safe_content()
             if html is not None and not self.stub_detector(html):
+                html = self._settle(html)
                 self.cookies_loaded = len(self._context.cookies())
                 log.info("проверка браузера пройдена, cookies: %d", self.cookies_loaded)
                 return True
@@ -336,6 +340,19 @@ class BrowserTransport:
                 time.sleep(0.5)
         return html
 
+    def _settle(self, html: str) -> str:
+        """Ждёт затишья в сети и короткую паузу: содержимое может дорисовываться скриптом после загрузки."""
+        try:
+            self._page.wait_for_load_state("networkidle", timeout=10_000)
+        except Exception:  # noqa: BLE001 -- затишья может не быть (опросы, счётчики)
+            pass
+        if self.settle_ms:
+            try:
+                self._page.wait_for_timeout(self.settle_ms)
+            except Exception:  # noqa: BLE001
+                time.sleep(self.settle_ms / 1000)
+        return self._safe_content() or html
+
     def _fetch_by_navigation(self, url: str) -> FetchResult:
         """GET как обычный переход по ссылке: браузер сам проходит проверку и отдаёт готовый DOM."""
         resp = None
@@ -345,6 +362,7 @@ class BrowserTransport:
             if not _is_navigation_error(exc):
                 raise
         html = self._wait_for_real_content()
+        html = self._settle(html)
         status = 200
         resp_headers: dict = {}
         final_url = url
