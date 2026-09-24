@@ -307,8 +307,7 @@ class BrowserTransport:
             if cached is not None:
                 self.stats["cache_hits"] += 1
                 return cached
-        if self._context is None:
-            self.start()
+        self._ensure_started()
 
         last_status = -1
         for attempt in range(self.max_retries + 1):
@@ -445,15 +444,23 @@ class BrowserTransport:
                            content=text.encode("utf-8"), headers=dict(result.get("headers") or {}), encoding="utf-8")
 
     # ------------------------------------------------------------------ работа со страницей
+    def _ensure_started(self) -> None:
+        """Браузер поднимается лениво: первая же операция со страницей запускает его."""
+        if self._context is None or self._page is None:
+            self.start()
+
     def open_page(self, url: str) -> str:
         """Переход на страницу; возвращает её HTML после прохождения проверок и дорисовки скриптами."""
+        self._ensure_started()
         return self._fetch_by_navigation(url).text
 
     def current_html(self) -> str:
+        self._ensure_started()
         return self._settle(self._safe_content() or "")
 
     def fill_field(self, name: str, value: str, timeout_ms: int = 5000) -> bool:
         """Заполняет поле по атрибуту name. Поля с датой часто readonly -- тогда ставим значение скриптом."""
+        self._ensure_started()
         selector = f'input[name="{name}"]'
         try:
             self._page.fill(selector, value, timeout=timeout_ms)
@@ -476,6 +483,7 @@ class BrowserTransport:
 
     def set_checkbox_group(self, name: str, values: list[str]) -> int:
         """Отмечает чекбоксы группы с указанными значениями (остальные снимает). Возвращает число отмеченных."""
+        self._ensure_started()
         return int(self._page.evaluate(
             """(arg) => {
                 const boxes = Array.from(document.querySelectorAll(`input[name="${arg.name}"]`));
@@ -492,6 +500,7 @@ class BrowserTransport:
             }""", {"name": name, "values": [str(v) for v in values]}))
 
     def click(self, selector: str, timeout_ms: int = 10_000) -> bool:
+        self._ensure_started()
         try:
             self._page.click(selector, timeout=timeout_ms)
             return True
@@ -506,6 +515,7 @@ class BrowserTransport:
         return None
 
     def wait_for_selector(self, selector: str, timeout_ms: int = 20_000) -> bool:
+        self._ensure_started()
         try:
             self._page.wait_for_selector(selector, timeout=timeout_ms)
             return True
@@ -513,6 +523,7 @@ class BrowserTransport:
             return False
 
     def field_names(self) -> list[str]:
+        self._ensure_started()
         try:
             return list(self._page.evaluate(
                 "() => Array.from(document.querySelectorAll('input[name],select[name],textarea[name]'))"
