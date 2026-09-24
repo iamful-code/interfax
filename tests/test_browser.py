@@ -56,7 +56,11 @@ class _Handler(BaseHTTPRequestHandler):
 <form id="f"><input type="text" name="dateStart" readonly><input type="text" name="dateFinish" readonly>
 <input type="checkbox" name="eventTypeCheckboxGroup" value="52"><input type="checkbox" name="eventTypeCheckboxGroup" value="12">
 <button type="button" id="sEventSearchForm__button-search">Найти</button></form>
+<div id="cookieBanner" style="position:fixed;left:0;top:0;width:100%;height:100%;z-index:99">
+  <button id="AcceptCookieBtn">Принять</button></div>
 <div id="results"></div>
+<script>document.getElementById('AcceptCookieBtn').addEventListener('click', function(){
+  document.getElementById('cookieBanner').remove(); });</script>
 <script>
 document.getElementById('sEventSearchForm__button-search').addEventListener('click', function(){
   const types = Array.from(document.querySelectorAll('input[name=eventTypeCheckboxGroup]:checked')).map(b => b.value);
@@ -372,3 +376,39 @@ def test_captcha_raises_when_auto_visible_disabled():
     with pytest.raises(CaptchaRequired) as e:
         tr._wait_for_real_content()
     assert "--show-browser" in str(e.value)
+
+
+def test_click_works_through_blocking_banner(transport, server, tmp_path):
+    """Кнопку поиска перекрывает баннер согласия: он закрывается, клик проходит."""
+    from disclosure_alpha.config import Settings
+    from disclosure_alpha.edisclosure.client import EDisclosureClient
+
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    client = EDisclosureClient(Settings(data_dir=tmp_path / "data", edisclosure_base_url=base), http=transport)
+    rows, _ = client.search_via_form(date(2024, 3, 14), date(2024, 3, 15))
+    assert len(rows) == 1
+
+
+def test_missing_button_reports_page_buttons(transport, server, tmp_path):
+    """Если кнопки нет, ошибка перечисляет кнопки страницы -- по ней видно, какой селектор нужен."""
+    from disclosure_alpha.config import Settings
+    from disclosure_alpha.edisclosure.client import EDisclosureClient
+    from disclosure_alpha.http import HttpError
+
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    settings = Settings(data_dir=tmp_path / "data", edisclosure_base_url=base)
+    client = EDisclosureClient(settings, http=transport)
+    client.SEARCH_BUTTON_SELECTORS = ("#no-such-button",)
+    with pytest.raises(HttpError) as e:
+        client.search_via_form(date(2024, 3, 14), date(2024, 3, 15))
+    assert "кнопк" in str(e.value).lower()
+    assert (settings.discovery_dir / "search_button_not_found.json").exists()
+
+
+def test_list_clickables_and_count(transport, server):
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    transport.open_page(base + "/poisk-po-soobshheniyam")
+    assert transport.count("#sEventSearchForm__button-search") == 1
+    assert transport.count("#nope") == 0
+    items = transport.list_clickables()
+    assert any(i["id"] == "sEventSearchForm__button-search" for i in items)

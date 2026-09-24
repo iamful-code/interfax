@@ -288,6 +288,8 @@ class EDisclosureClient:
 
     # ------------------------------------------------------------------ поиск через саму форму (браузер)
     SEARCH_BUTTON_SELECTORS = ("#sEventSearchForm__button-search", ".sEventSearchForm__button-search",
+                               "[id*='button-search']", "[class*='button-search']",
+                               "form button[type=submit]", "form input[type=submit]",
                                "button[type=submit]", "input[type=submit]")
     CONFIRM_BUTTON_SELECTORS = ("#sEventSearchForm__button-confirm", ".sEventSearchForm__button-confirm")
     RESULTS_SELECTORS = ("a[href*='EventId']", "a[href*='/event/']", "table tbody tr", ".searchResult", "[class*=result] a")
@@ -314,11 +316,30 @@ class EDisclosureClient:
             checked = tr.set_checkbox_group(fm["event_types"], [str(x) for x in event_type_ids])
             tr.click_first(list(self.CONFIRM_BUTTON_SELECTORS))
         log.info("форма поиска: заполнено %s, отмечено типов: %d", filled, checked)
-        if not tr.click_first(list(self.SEARCH_BUTTON_SELECTORS)):
-            raise HttpError(self.url(SEARCH_PATH), 0, "не найдена кнопка поиска на странице")
+        closed = tr.dismiss_overlays()
+        if closed:
+            log.info("закрыты перекрывающие баннеры: %s", closed)
+        clicked = tr.click_first(list(self.SEARCH_BUTTON_SELECTORS))
+        if not clicked:
+            clickables = tr.list_clickables()
+            self._save_diagnostic("search_button_not_found.json", {"selectors_tried": list(self.SEARCH_BUTTON_SELECTORS),
+                                                                   "clickables": clickables})
+            visible = [c for c in clickables if c.get("visible")]
+            raise HttpError(self.url(SEARCH_PATH), 0,
+                            "не найдена кнопка поиска. Видимые кнопки на странице: "
+                            + "; ".join(f"{c['tag']}#{c['id']}.{c['cls']} {c['text']!r}" for c in visible[:10]))
+        log.info("нажата кнопка поиска: %s", clicked)
         tr.wait_for_selector(wait_selector or ", ".join(self.RESULTS_SELECTORS), timeout_ms=30_000)
         html = tr.current_html()
         return parsers.parse_search_results(html, self.base_url), html
+
+    def _save_diagnostic(self, name: str, data: dict) -> Path:
+        out = Path(self.settings.discovery_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / name
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), "utf-8")
+        log.info("диагностика сохранена: %s", path)
+        return path
 
     def probe_search(self, date_from: date, date_till: date, event_type_ids: Optional[Iterable[str]] = None,
                      out_dir: Optional[Path] = None) -> dict:
@@ -330,7 +351,8 @@ class EDisclosureClient:
         summary = {"date_from": str(date_from), "date_till": str(date_till),
                    "event_type_ids": list(event_type_ids or []), "rows_parsed": len(rows),
                    "sample": [r.to_dict() for r in rows[:5]], "dom": parsers.describe_dom(html),
-                   "field_names": self.http.field_names()}
+                   "field_names": self.http.field_names(), "clickables": self.http.list_clickables(30),
+                   "page_url": getattr(self.http, "_page", None) and self.http._page.url}
         (out_dir / "search_probe.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), "utf-8")
         return summary
 

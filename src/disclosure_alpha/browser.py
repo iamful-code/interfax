@@ -527,19 +527,66 @@ class BrowserTransport:
             }""", {"name": name, "values": [str(v) for v in values]}))
 
     def click(self, selector: str, timeout_ms: int = 10_000) -> bool:
+        """Клик по селектору: обычный, затем принудительный, затем через DOM (элемент может быть перекрыт)."""
         self._ensure_started()
+        for kwargs in ({}, {"force": True}):
+            try:
+                self._page.click(selector, timeout=timeout_ms, **kwargs)
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+        return self.js_click(selector)
+
+    def js_click(self, selector: str) -> bool:
         try:
-            self._page.click(selector, timeout=timeout_ms)
-            return True
+            return bool(self._page.evaluate(
+                "(sel) => { const el = document.querySelector(sel); if (!el) return false; el.click(); return true; }",
+                selector))
         except Exception:  # noqa: BLE001
             return False
 
     def click_first(self, selectors: list[str], timeout_ms: int = 4000) -> Optional[str]:
         """Кликает первый существующий селектор из списка; возвращает сработавший."""
         for sel in selectors:
+            if self.count(sel) and self.click(sel, timeout_ms):
+                return sel
+        for sel in selectors:                      # запасной проход: элемент мог появиться позже
             if self.click(sel, timeout_ms):
                 return sel
         return None
+
+    def count(self, selector: str) -> int:
+        """Сколько элементов подходит под селектор (0 -- селектор не о том)."""
+        self._ensure_started()
+        try:
+            return int(self._page.evaluate("(sel) => document.querySelectorAll(sel).length", selector))
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def dismiss_overlays(self, selectors: Optional[list[str]] = None) -> list[str]:
+        """Закрывает баннеры (согласие на cookies и т.п.), которые перехватывают клики."""
+        selectors = selectors or ["#AcceptCookieBtn", "#acceptCookie", ".cookie-accept", "[id*=AcceptCookie]",
+                                  "[class*=cookie] button", "[id*=cookie] button"]
+        closed = []
+        for sel in selectors:
+            if self.count(sel) and self.js_click(sel):
+                closed.append(sel)
+        return closed
+
+    def list_clickables(self, limit: int = 60) -> list[dict]:
+        """Кнопки и ссылки-кнопки на странице -- для диагностики, когда нужный элемент не найден."""
+        self._ensure_started()
+        try:
+            return list(self._page.evaluate(
+                """(limit) => Array.from(document.querySelectorAll(
+                        'button, input[type=submit], input[type=button], a[role=button], [class*=button], [id*=button]'))
+                    .slice(0, limit)
+                    .map(e => ({tag: e.tagName.toLowerCase(), id: e.id || null,
+                                cls: (e.className && e.className.toString().slice(0, 80)) || null,
+                                text: ((e.innerText || e.value || '').trim().slice(0, 50)) || null,
+                                visible: !!(e.offsetParent || e.getClientRects().length)}))""", limit))
+        except Exception:  # noqa: BLE001
+            return []
 
     def wait_for_selector(self, selector: str, timeout_ms: int = 20_000) -> bool:
         self._ensure_started()
