@@ -444,6 +444,82 @@ class BrowserTransport:
         return FetchResult(url=result.get("url") or url, status=int(result.get("status", 0)),
                            content=text.encode("utf-8"), headers=dict(result.get("headers") or {}), encoding="utf-8")
 
+    # ------------------------------------------------------------------ работа со страницей
+    def open_page(self, url: str) -> str:
+        """Переход на страницу; возвращает её HTML после прохождения проверок и дорисовки скриптами."""
+        return self._fetch_by_navigation(url).text
+
+    def current_html(self) -> str:
+        return self._settle(self._safe_content() or "")
+
+    def fill_field(self, name: str, value: str, timeout_ms: int = 5000) -> bool:
+        """Заполняет поле по атрибуту name. Поля с датой часто readonly -- тогда ставим значение скриптом."""
+        selector = f'input[name="{name}"]'
+        try:
+            self._page.fill(selector, value, timeout=timeout_ms)
+            return True
+        except Exception:  # noqa: BLE001 -- readonly/скрытое поле: пробуем через DOM
+            try:
+                ok = self._page.evaluate(
+                    """(arg) => {
+                        const el = document.querySelector(`input[name="${arg.name}"]`);
+                        if (!el) return false;
+                        el.removeAttribute('readonly');
+                        el.value = arg.value;
+                        el.dispatchEvent(new Event('input', {bubbles: true}));
+                        el.dispatchEvent(new Event('change', {bubbles: true}));
+                        return true;
+                    }""", {"name": name, "value": value})
+                return bool(ok)
+            except Exception:  # noqa: BLE001
+                return False
+
+    def set_checkbox_group(self, name: str, values: list[str]) -> int:
+        """Отмечает чекбоксы группы с указанными значениями (остальные снимает). Возвращает число отмеченных."""
+        return int(self._page.evaluate(
+            """(arg) => {
+                const boxes = Array.from(document.querySelectorAll(`input[name="${arg.name}"]`));
+                let n = 0;
+                for (const b of boxes) {
+                    const want = arg.values.includes(b.value);
+                    if (b.checked !== want) {
+                        b.click();
+                        if (b.checked !== want) { b.checked = want; b.dispatchEvent(new Event('change', {bubbles: true})); }
+                    }
+                    if (want) n++;
+                }
+                return n;
+            }""", {"name": name, "values": [str(v) for v in values]}))
+
+    def click(self, selector: str, timeout_ms: int = 10_000) -> bool:
+        try:
+            self._page.click(selector, timeout=timeout_ms)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def click_first(self, selectors: list[str], timeout_ms: int = 4000) -> Optional[str]:
+        """Кликает первый существующий селектор из списка; возвращает сработавший."""
+        for sel in selectors:
+            if self.click(sel, timeout_ms):
+                return sel
+        return None
+
+    def wait_for_selector(self, selector: str, timeout_ms: int = 20_000) -> bool:
+        try:
+            self._page.wait_for_selector(selector, timeout=timeout_ms)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def field_names(self) -> list[str]:
+        try:
+            return list(self._page.evaluate(
+                "() => Array.from(document.querySelectorAll('input[name],select[name],textarea[name]'))"
+                ".map(e => e.name).filter((v, i, a) => a.indexOf(v) === i)"))
+        except Exception:  # noqa: BLE001
+            return []
+
     def get(self, url: str, params: Optional[Mapping] = None, **kw) -> FetchResult:
         return self.request("GET", url, params=params, **kw)
 

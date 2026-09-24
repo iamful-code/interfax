@@ -87,6 +87,33 @@ def cmd_discover(args):
               f"чекбокс-групп={list(form['checkbox_groups'])} типов сообщений={len(form['event_type_options'])}")
 
 
+def cmd_probe_search(args):
+    """Выполняет поиск через форму в браузере и описывает разметку результатов."""
+    settings = load_settings()
+    args.browser = True          # без браузера форму не отправить
+    client = _ed_client(args, settings)
+    try:
+        summary = client.probe_search(_date(args.date_from), _date(args.date_till),
+                                      _categories(args.event_types), Path(args.out) if args.out else None)
+    finally:
+        client.close()
+    dom = summary["dom"]
+    c = dom["counts"]
+    print(f"строк разобрано: {summary['rows_parsed']}")
+    print(f"структура ответа: ссылок={c['anchors']} таблиц={c['tables']} строк={c['rows']} размер={c['html_len']}")
+    print(f"виды ссылок: {dom['anchor_patterns'][:15]}")
+    if dom.get("ids"):
+        print(f"идентификаторы: {dom['ids'][:20]}")
+    if dom.get("top_classes"):
+        print(f"частые классы: {dom['top_classes'][:15]}")
+    if dom.get("buttons"):
+        print(f"кнопки: {[(b.get('id') or b.get('text')) for b in dom['buttons'][:10]]}")
+    print(f"имена полей на странице: {summary['field_names'][:25]}")
+    for row in summary["sample"]:
+        print(f"  пример строки: {row}")
+    print(f"подробности: {(Path(args.out) if args.out else settings.discovery_dir) / 'search_probe.json'}")
+
+
 def cmd_companies(args):
     from .pipeline import build_universe
     settings = load_settings()
@@ -208,6 +235,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = add_browser_flag(sub.add_parser("discover", help="скачать ключевые страницы e-disclosure и описать их структуру"))
     s.add_argument("--out")
     s.set_defaults(func=cmd_discover)
+
+    s = add_browser_flag(sub.add_parser("probe-search", help="выполнить поиск через форму в браузере и описать разметку результатов"))
+    s.add_argument("--from", dest="date_from", required=True, help="YYYY-MM-DD")
+    s.add_argument("--till", dest="date_till", required=True, help="YYYY-MM-DD")
+    s.add_argument("--event-types", help="идентификаторы типов сообщений через запятую (из discovery.json)")
+    s.add_argument("--out")
+    s.set_defaults(func=cmd_probe_search)
 
     s = add_browser_flag(sub.add_parser("companies", help="справочник акций MOEX (ISS) + сопоставление с компаниями e-disclosure по ИНН"))
     s.add_argument("--limit", type=int)

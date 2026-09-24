@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -50,6 +51,24 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data.encode("utf-8"))
             return
+        if urlparse(self.path).path == "/poisk-po-soobshheniyam":
+            return self._send("""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Поиск</title></head><body>
+<form id="f"><input type="text" name="dateStart" readonly><input type="text" name="dateFinish" readonly>
+<input type="checkbox" name="eventTypeCheckboxGroup" value="52"><input type="checkbox" name="eventTypeCheckboxGroup" value="12">
+<button type="button" id="sEventSearchForm__button-search">Найти</button></form>
+<div id="results"></div>
+<script>
+document.getElementById('sEventSearchForm__button-search').addEventListener('click', function(){
+  const types = Array.from(document.querySelectorAll('input[name=eventTypeCheckboxGroup]:checked')).map(b => b.value);
+  const from = document.querySelector('input[name=dateStart]').value.replace(/\./g, '');
+  const till = document.querySelector('input[name=dateFinish]').value.replace(/\./g, '');
+  setTimeout(function(){
+    document.getElementById('results').innerHTML =
+      '<table><tr><td>15.03.2024 18:52</td><td><a href="/portal/company.aspx?id=3043">ПАО Сбербанк</a></td>' +
+      '<td><a href="/portal/event.aspx?EventId=E-' + from + '-' + till + '-' + types.join('_') + '">Тип сообщения</a></td></tr></table>';
+  }, 300);
+});
+</script></body></html>""")
         if urlparse(self.path).path == "/spa":
             return self._send("""<!DOCTYPE html><html><head><meta charset="utf-8"><title>SPA</title></head>
 <body><div id="app"></div><script>setTimeout(function(){
@@ -284,3 +303,27 @@ def test_captcha_page_classified_and_not_mistaken_for_content():
     assert is_protection_stub(CAPTCHA_HTML)          # как контент такую страницу не отдаём
     assert classify_page(REAL) == "content"
     assert classify_page(STUB) == "stub"
+
+
+def test_search_via_form_fills_and_clicks(transport, server, tmp_path):
+    """Поиск выполняется заполнением формы и нажатием кнопки: так работает сайт с клиентским скриптом."""
+    from disclosure_alpha.config import Settings
+    from disclosure_alpha.edisclosure.client import EDisclosureClient
+
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    settings = Settings(data_dir=tmp_path / "data", edisclosure_base_url=base)
+    client = EDisclosureClient(settings, http=transport)
+    assert client.is_browser
+
+    rows, html = client.search_via_form(date(2024, 3, 14), date(2024, 3, 15), event_type_ids=["52", "12"])
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.company_id == 3043 and r.company_name == "ПАО Сбербанк"
+    assert r.published_at == datetime(2024, 3, 15, 18, 52)
+    # значения дошли до формы: даты в формате ДД.ММ.ГГГГ и оба типа сообщений
+    assert r.event_id == "E-14032024-15032024-52_12"
+
+    summary = client.probe_search(date(2024, 3, 14), date(2024, 3, 15), ["52"], tmp_path / "probe")
+    assert summary["rows_parsed"] == 1
+    assert "dateStart" in summary["field_names"]
+    assert (tmp_path / "probe" / "search_probe.json").exists()

@@ -285,6 +285,54 @@ class EDisclosureClient:
         log.info("discovery сохранён в %s", out_dir)
         return summary
 
+    # ------------------------------------------------------------------ поиск через саму форму (браузер)
+    SEARCH_BUTTON_SELECTORS = ("#sEventSearchForm__button-search", ".sEventSearchForm__button-search",
+                               "button[type=submit]", "input[type=submit]")
+    CONFIRM_BUTTON_SELECTORS = ("#sEventSearchForm__button-confirm", ".sEventSearchForm__button-confirm")
+    RESULTS_SELECTORS = ("a[href*='EventId']", "a[href*='/event/']", "table tbody tr", ".searchResult", "[class*=result] a")
+
+    def search_via_form(self, date_from: date, date_till: date, event_type_ids: Optional[Iterable[str]] = None,
+                        query: Optional[str] = None, wait_selector: Optional[str] = None) -> tuple[list[MessageRow], str]:
+        """Заполняет форму поиска прямо в браузере и нажимает «Найти». Возвращает (строки, HTML результатов).
+
+        Используется в браузерном режиме, потому что форму отправляет скрипт страницы, а не обычный POST.
+        """
+        if not self.is_browser:
+            raise RuntimeError("search_via_form доступен только в браузерном режиме (--browser)")
+        tr = self.http
+        tr.open_page(self.url(SEARCH_PATH))
+        fm = self.field_map
+        filled = {
+            fm["date_from"]: tr.fill_field(fm["date_from"], _fmt_date(date_from)),
+            fm["date_till"]: tr.fill_field(fm["date_till"], _fmt_date(date_till)),
+        }
+        if query:
+            filled[fm["query"]] = tr.fill_field(fm["query"], query)
+        checked = 0
+        if event_type_ids:
+            checked = tr.set_checkbox_group(fm["event_types"], [str(x) for x in event_type_ids])
+            tr.click_first(list(self.CONFIRM_BUTTON_SELECTORS))
+        log.info("форма поиска: заполнено %s, отмечено типов: %d", filled, checked)
+        if not tr.click_first(list(self.SEARCH_BUTTON_SELECTORS)):
+            raise HttpError(self.url(SEARCH_PATH), 0, "не найдена кнопка поиска на странице")
+        tr.wait_for_selector(wait_selector or ", ".join(self.RESULTS_SELECTORS), timeout_ms=30_000)
+        html = tr.current_html()
+        return parsers.parse_search_results(html, self.base_url), html
+
+    def probe_search(self, date_from: date, date_till: date, event_type_ids: Optional[Iterable[str]] = None,
+                     out_dir: Optional[Path] = None) -> dict:
+        """Разведка результатов поиска: выполняет запрос через форму и описывает разметку ответа."""
+        out_dir = Path(out_dir or self.settings.discovery_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        rows, html = self.search_via_form(date_from, date_till, event_type_ids)
+        (out_dir / "search_results.html").write_text(html, "utf-8")
+        summary = {"date_from": str(date_from), "date_till": str(date_till),
+                   "event_type_ids": list(event_type_ids or []), "rows_parsed": len(rows),
+                   "sample": [r.to_dict() for r in rows[:5]], "dom": parsers.describe_dom(html),
+                   "field_names": self.http.field_names()}
+        (out_dir / "search_probe.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), "utf-8")
+        return summary
+
     # ------------------------------------------------------------------ search
     def _build_search_payload(self, date_from: date, date_till: date, page: int, page_size: int,
                               event_type_ids: Optional[Iterable[str]], query: Optional[str],
