@@ -1,0 +1,26 @@
+{
+  "base_url": "https://e-disclosure.ru",
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+  "cookies_loaded": 0,
+  "fetched_at": "2026-09-24T23:38:18",
+  "pages": {
+    "search": {
+      "status": "ok",
+      "http_status": 200,
+      "url": "https://e-disclosure.ru/poisk-po-soobshheniyam",
+      "links_portal": [],
+      "script_endpoints": []
+    },
+    "lastnews": {
+      "status": "ok",
+      "http_status": 200,
+      "url": "https://e-disclosure.ru/portal/lastnews.aspx",
+      "rows_parsed": 0,
+      "sample": [],
+      "script_endpoints": []
+    }
+  },
+  "hints": [
+    "На странице поиска не найдена форма -- вероятно, она строится скриптом; пришлите search_page.html"
+  ]
+}
