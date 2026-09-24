@@ -35,6 +35,15 @@ LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled"]
 IGNORE_DEFAULT_ARGS = ["--enable-automation"]
 
 
+_NAVIGATION_ERROR_MARKERS = ("navigating and changing the content", "execution context was destroyed",
+                             "target closed", "frame was detached", "navigation")
+
+
+def _is_navigation_error(exc: BaseException) -> bool:
+    """Ошибки Playwright, означающие «страница сейчас перезагружается», а не настоящий сбой."""
+    return any(m in str(exc).lower() for m in _NAVIGATION_ERROR_MARKERS)
+
+
 def normal_user_agent(ua: str) -> str:
     """HeadlessChrome в User-Agent -- явный признак робота; подменяем на обычный Chrome."""
     return (ua or "").replace("HeadlessChrome", "Chrome")
@@ -143,13 +152,13 @@ class BrowserTransport:
                 "не установлен Playwright. Выполните: pip install playwright && playwright install chromium") from exc
         self._pw = sync_playwright().start()
         self._launch(self.user_agent)
-        real_ua = self._page.evaluate("() => navigator.userAgent")
+        real_ua = self._read_user_agent()
         if self.user_agent is None and normal_user_agent(real_ua) != real_ua:
             # headless выдаёт себя строкой HeadlessChrome -- перезапускаем с обычным User-Agent
             self.user_agent = normal_user_agent(real_ua)
             self._close_browser()
             self._launch(self.user_agent)
-            real_ua = self._page.evaluate("() => navigator.userAgent")
+            real_ua = self._read_user_agent()
         self.session.headers["User-Agent"] = real_ua
         self.warmup()
         return self
@@ -176,6 +185,14 @@ class BrowserTransport:
         pages = getattr(self._context, "pages", None)
         self._page = pages[0] if pages else self._context.new_page()
 
+    def _read_user_agent(self) -> str:
+        try:
+            return self._page.evaluate("() => navigator.userAgent") or ""
+        except Exception as exc:  # noqa: BLE001
+            if _is_navigation_error(exc):
+                return self.user_agent or ""
+            raise
+
     def _close_browser(self) -> None:
         for obj in (self._context, self._browser):
             if obj is not None:
@@ -185,6 +202,20 @@ class BrowserTransport:
                     pass
         self._browser = self._context = self._page = None
 
+    def _safe_content(self) -> Optional[str]:
+        """HTML текущей страницы; None -- страница как раз перезагружается (так ведёт себя JS-проверка)."""
+        for wait_for in ("domcontentloaded",):
+            try:
+                self._page.wait_for_load_state(wait_for, timeout=5000)
+            except Exception:  # noqa: BLE001 -- таймаут ожидания не критичен
+                pass
+        try:
+            return self._page.content()
+        except Exception as exc:  # noqa: BLE001
+            if _is_navigation_error(exc):
+                return None
+            raise
+
     def warmup(self) -> bool:
         """Открывает стартовую страницу и ждёт, пока пройдёт проверка браузера. True -- контент получен."""
         if self._page is None:
@@ -192,15 +223,23 @@ class BrowserTransport:
             return True
         self.stats["warmups"] += 1
         deadline = time.time() + self.warmup_timeout_sec
-        self._page.goto(self.warmup_url, wait_until="domcontentloaded")
+        try:
+            self._page.goto(self.warmup_url, wait_until="domcontentloaded")
+        except Exception as exc:  # noqa: BLE001 -- проверка может увести страницу прямо во время перехода
+            if not _is_navigation_error(exc):
+                raise
         while time.time() < deadline:
-            html = self._page.content()
-            if not self.stub_detector(html):
+            html = self._safe_content()
+            if html is not None and not self.stub_detector(html):
                 self.cookies_loaded = len(self._context.cookies())
                 log.info("проверка браузера пройдена, cookies: %d", self.cookies_loaded)
                 return True
-            self._page.wait_for_timeout(1000)
-        log.warning("проверка браузера не завершилась за %.0f с", self.warmup_timeout_sec)
+            try:
+                self._page.wait_for_timeout(1000)
+            except Exception:  # noqa: BLE001
+                time.sleep(1.0)
+        log.warning("проверка браузера не завершилась за %.0f с: увеличьте DA_BROWSER_WARMUP_TIMEOUT "
+                    "или запустите с видимым окном (--show-browser)", self.warmup_timeout_sec)
         return False
 
     def close(self) -> None:

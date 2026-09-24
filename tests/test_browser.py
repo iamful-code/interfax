@@ -121,3 +121,58 @@ def test_rewarms_when_cookies_dropped(transport, server):
     res = transport.get(base + "/poisk", use_cache=False)
     assert "Настоящая страница" in res.text
     assert transport.stats["warmups"] > warmups_before   # заглушка распознана, прогрев повторён
+
+
+class _FlakyPage:
+    """Страница, которая при первом обращении «перезагружается» (как во время JS-проверки)."""
+
+    def __init__(self, error_cls, html="<html><body>ok</body></html>"):
+        self.calls = 0
+        self.error_cls = error_cls
+        self.html = html
+
+    def wait_for_load_state(self, *a, **kw):
+        return None
+
+    def wait_for_timeout(self, *a, **kw):
+        return None
+
+    def content(self):
+        self.calls += 1
+        if self.calls == 1:
+            raise self.error_cls("Page.content: Unable to retrieve content because the page is navigating "
+                                 "and changing the content.")
+        return self.html
+
+    def evaluate(self, *a, **kw):
+        raise self.error_cls("Execution context was destroyed, most likely because of a navigation.")
+
+
+def test_safe_content_survives_navigation(server):
+    from playwright.sync_api import Error as PwError
+
+    from disclosure_alpha.browser import _is_navigation_error, normal_user_agent
+
+    tr = BrowserTransport(warmup_url="http://127.0.0.1:1/", stub_detector=_stub)
+    tr._page = _FlakyPage(PwError)
+    assert tr._safe_content() is None          # первая попытка приходится на перезагрузку
+    assert tr._safe_content() == "<html><body>ok</body></html>"
+    tr.user_agent = "UA"
+    assert tr._read_user_agent() == "UA"        # ошибка навигации не валит чтение User-Agent
+
+    assert _is_navigation_error(PwError("Page.content: ... navigating and changing the content."))
+    assert not _is_navigation_error(PwError("net::ERR_CONNECTION_REFUSED"))
+    assert normal_user_agent("Mozilla/5.0 HeadlessChrome/141") == "Mozilla/5.0 Chrome/141"
+
+
+def test_safe_content_reraises_real_errors():
+    from playwright.sync_api import Error as PwError
+
+    class _Broken(_FlakyPage):
+        def content(self):
+            raise self.error_cls("net::ERR_CONNECTION_REFUSED")
+
+    tr = BrowserTransport(warmup_url="http://127.0.0.1:1/", stub_detector=_stub)
+    tr._page = _Broken(PwError)
+    with pytest.raises(PwError):
+        tr._safe_content()
