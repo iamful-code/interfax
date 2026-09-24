@@ -90,7 +90,7 @@ def _label_for(inp: Tag, soup: BeautifulSoup) -> str:
     return ""
 
 
-def parse_search_form(html: str, base_url: str = "https://e-disclosure.ru") -> Optional[FormSpec]:
+def parse_search_form(html: str, base_url: str = "https://e-disclosure.ru", page_url: Optional[str] = None) -> Optional[FormSpec]:
     """Находит форму поиска по сообщениям (по признакам: поля дат, чекбоксы типов) и описывает её поля."""
     soup = soup_of(html)
     forms = soup.find_all("form")
@@ -107,7 +107,9 @@ def parse_search_form(html: str, base_url: str = "https://e-disclosure.ru") -> O
         return s
 
     form = max(forms, key=score)
-    spec = FormSpec(action=urljoin(base_url, form.get("action") or ""), method=(form.get("method") or "get").lower())
+    # пустой action означает отправку на адрес самой страницы, а не на корень сайта
+    spec = FormSpec(action=urljoin(page_url or base_url, form.get("action") or ""),
+                    method=(form.get("method") or "get").lower())
     for inp in form.find_all("input"):
         name = inp.get("name")
         if not name:
@@ -399,6 +401,16 @@ def describe_dom(html: str, max_items: int = 40) -> dict:
     for a in soup.find_all("a", href=True):
         anchors.append({"href": a["href"][:200], "text": clean_text(a.get_text(" "))[:80]})
 
+    patterns: dict[str, int] = {}
+    for a in anchors:
+        href = a["href"].split("#")[0]
+        path = re.sub(r"^https?://[^/]+", "", href)
+        path = re.sub(r"\d+", "{n}", path.split("?")[0])
+        query = href.split("?", 1)[1] if "?" in href else ""
+        keys = ",".join(sorted({kv.split("=")[0] for kv in query.split("&") if kv})) if query else ""
+        key = path + (f"?{keys}" if keys else "")
+        patterns[key] = patterns.get(key, 0) + 1
+
     classes: dict[str, int] = {}
     for el in soup.find_all(class_=True):
         for c in el.get("class") or []:
@@ -422,6 +434,11 @@ def describe_dom(html: str, max_items: int = 40) -> dict:
         "selects": selects[:max_items],
         "buttons": buttons[:max_items],
         "anchors_sample": anchors[:max_items],
+        "anchor_patterns": sorted(patterns.items(), key=lambda kv: -kv[1])[:max_items],
+        "text_fields": [{"name": i.get("name"), "id": i.get("id"), "type": (i.get("type") or "text").lower(),
+                         "placeholder": i.get("placeholder"), "value": (i.get("value") or "")[:40]}
+                        for i in soup.find_all("input")
+                        if (i.get("type") or "text").lower() not in ("checkbox", "radio", "submit", "button", "image")][:max_items],
         "event_links": [a["href"] for a in anchors if EVENT_ID_RE.search(a["href"])][:10],
         "company_links": [a["href"] for a in anchors if COMPANY_ID_RE.search(a["href"])][:10],
         "ids": [i for i in ids if i],

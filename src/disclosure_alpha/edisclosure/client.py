@@ -120,7 +120,7 @@ class EDisclosureClient:
             raise HttpError(res.url, res.status,
                             "страница поиска отдаёт заглушку антибот-защиты; нужны cookies браузера в config/cookies.txt",
                             body=res.text)
-        self._form = parsers.parse_search_form(res.text, self.base_url)
+        self._form = parsers.parse_search_form(res.text, self.base_url, page_url=self.url(SEARCH_PATH))
         if self._form is None:
             log.warning("форма поиска не найдена на %s (возможно, рендерится JS) -- используем FIELD_MAP как есть", SEARCH_PATH)
         return self._form
@@ -168,6 +168,21 @@ class EDisclosureClient:
             info["diagnosis"] = diagnose_block(e.status, e.body or "", e.headers)
             return None, info
 
+    FEED_PATH_HINTS = ("lenta", "novost", "news", "soobsh", "feed", "raskrytie")
+
+    def _feed_candidates(self, summary: dict) -> list[str]:
+        """Кандидаты в адрес ленты сообщений: ссылки со страницы поиска, похожие на ленту новостей."""
+        dom = (summary.get("pages", {}).get("search") or {}).get("dom") or {}
+        out: list[str] = []
+        for a in dom.get("anchors_sample", []):
+            href, text = a.get("href", ""), (a.get("text") or "").lower()
+            if not href or href.startswith(("#", "mailto:", "javascript:")):
+                continue
+            hay = (href + " " + text).lower()
+            if any(h in hay for h in self.FEED_PATH_HINTS) and href not in out:
+                out.append(href)
+        return out
+
     def discover(self, out_dir: Optional[Path] = None, sample_event: bool = True, quick: bool = True) -> dict:
         """Скачивает ключевые страницы, сохраняет HTML и сводку структуры (формы, ссылки, ajax-эндпоинты).
 
@@ -193,7 +208,7 @@ class EDisclosureClient:
                     html = alt_html
             if html is not None:
                 self._search_html = html
-                form = parsers.parse_search_form(html, self.base_url)
+                form = parsers.parse_search_form(html, self.base_url, page_url=self.url(SEARCH_PATH))
                 self._form = form
                 info["dom"] = parsers.describe_dom(html)
                 info["links_portal"] = parsers.find_links(html, self.base_url, r"/portal/|poisk")
@@ -206,9 +221,16 @@ class EDisclosureClient:
                     summary["hints"].append("На странице поиска не найдена форма -- вероятно, она строится скриптом; пришлите search_page.html")
             summary["pages"]["search"] = info
 
-            # 2. лента последних сообщений
+            # 2. лента последних сообщений: старый адрес мог смениться -- пробуем кандидатов
             rows: list[MessageRow] = []
-            html, info = self._probe("lastnews", self.url(LASTNEWS_PATH), out_dir)
+            feed_candidates = [LASTNEWS_PATH] + [c for c in self._feed_candidates(summary) if c != LASTNEWS_PATH]
+            html, info = None, {"status": "не пробовали"}
+            for i, path in enumerate(feed_candidates[:5]):
+                html, info = self._probe("lastnews" if i == 0 else f"feed_{i}", self.url(path) if path.startswith("/") else path, out_dir)
+                info["path"] = path
+                if html is not None and parsers.parse_message_list(html, self.base_url):
+                    break
+            summary["feed_candidates_tried"] = [c for c in feed_candidates[:5]]
             if html is not None:
                 rows = parsers.parse_lastnews(html, self.base_url)
                 info.update({"rows_parsed": len(rows), "sample": [r.to_dict() for r in rows[:5]],
