@@ -50,9 +50,24 @@ def _fmt_date(d: date | datetime) -> str:
 
 class EDisclosureClient:
     def __init__(self, settings: Optional[Settings] = None, http: Optional[HttpClient] = None,
-                 field_map: Optional[dict] = None, form_config_path: Optional[Path] = None):
+                 field_map: Optional[dict] = None, form_config_path: Optional[Path] = None,
+                 use_browser: Optional[bool] = None):
         self.settings = settings or load_settings()
         self.base_url = self.settings.edisclosure_base_url.rstrip("/")
+        self.owns_transport = http is None
+        if http is None and (self.settings.use_browser if use_browser is None else use_browser):
+            from ..browser import BrowserTransport
+
+            http = BrowserTransport(
+                warmup_url=self.base_url + SEARCH_PATH,
+                min_interval_sec=self.settings.edisclosure_min_interval_sec,
+                timeout_sec=self.settings.timeout_sec,
+                cache_dir=self.settings.cache_dir / "edisclosure",
+                headless=self.settings.browser_headless,
+                user_data_dir=self.settings.browser_profile_dir,
+                stub_detector=is_protection_stub,
+                warmup_timeout_sec=self.settings.browser_warmup_timeout_sec,
+            )
         self.http = http or HttpClient(
             min_interval_sec=self.settings.edisclosure_min_interval_sec,
             user_agent=self.settings.user_agent,
@@ -74,6 +89,21 @@ class EDisclosureClient:
         self._search_html: Optional[str] = None
 
     # ------------------------------------------------------------------ helpers
+    def close(self) -> None:
+        """Закрывает транспорт, если он наш (актуально для браузерного режима)."""
+        if self.owns_transport and hasattr(self.http, "close"):
+            self.http.close()
+
+    def __enter__(self) -> "EDisclosureClient":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    @property
+    def is_browser(self) -> bool:
+        return type(self.http).__name__ == "BrowserTransport"
+
     def url(self, path: str) -> str:
         return self.base_url + path
 
@@ -129,8 +159,7 @@ class EDisclosureClient:
         """
         out_dir = Path(out_dir or self.settings.discovery_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        summary: dict = {"base_url": self.base_url, "user_agent": self.http.session.headers.get("User-Agent"),
-                         "cookies_loaded": getattr(self.http, "cookies_loaded", 0),
+        summary: dict = {"base_url": self.base_url, "transport": "browser" if self.is_browser else "http",
                          "fetched_at": datetime.now().isoformat(timespec="seconds"), "pages": {}, "hints": []}
         prev_retries = self.http.max_retries
         if quick:
@@ -192,6 +221,17 @@ class EDisclosureClient:
         finally:
             self.http.max_retries = prev_retries
 
+        # значения известны только после первого запроса (браузер стартует лениво)
+        summary["user_agent"] = self.http.session.headers.get("User-Agent")
+        summary["cookies_loaded"] = getattr(self.http, "cookies_loaded", 0)
+        summary["placeholder_cookies"] = getattr(self.http, "placeholder_cookies", [])
+        if summary.get("placeholder_cookies"):
+            summary["hints"].insert(0, "в config/cookies.txt остались шаблонные значения ("
+                                    + ", ".join(summary["placeholder_cookies"])
+                                    + "): подставьте настоящие из браузера или используйте режим --browser")
+        if any(p.get("stub") for p in summary["pages"].values()) and not self.is_browser:
+            summary["hints"].append("проверку браузера можно проходить автоматически: "
+                                    "pip install playwright && playwright install chromium, затем disclosure-alpha discover --browser")
         for name, page in summary["pages"].items():
             diag = page.get("diagnosis")
             if diag:

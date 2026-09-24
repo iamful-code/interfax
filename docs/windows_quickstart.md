@@ -107,6 +107,7 @@ disclosure-alpha backtest --hold-days 20 --split-date 2022-01-01   # страт�
 | `Activate.ps1 cannot be loaded because running scripts is disabled` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, затем повторить активацию; либо использовать `cmd` и `.venv\Scripts\activate.bat` |
 | `disclosure-alpha : The term ... is not recognized` | Не активировано окружение (`.venv\Scripts\Activate.ps1`) или установка не прошла (`pip install -e ".[dev]"`) |
 | `HTTP 403` от e-disclosure | Гео-блокировка: запускать из РФ или через прокси (`$env:HTTPS_PROXY`) |
+| `заглушка антибот-защиты (HTTP 200, но контента нет)` | Проверка браузера не пройдена. Самое простое решение — режим `--browser` (см. раздел выше). Вариант с ручным копированием cookies — раздел «Cookies браузера» |
 | `HTTP 503` с HTML-страницей (в `discover` все страницы `error: HTTP 503`) | Либо техработы, либо антибот-защита. 1) Откройте https://e-disclosure.ru/poisk-po-soobshheniyam в браузере: если не открывается — техработы, повторите позже. 2) Если открывается — это защита от ботов: см. раздел «Cookies браузера» ниже. `discover` сохраняет страницу ошибки в `data\discovery\search_page_error.html` и печатает вердикт (`! search: HTTP 503; признаки: ...`) — пришлите его разработчику, если шаги ниже не помогли |
 | `HTTP 429` / соединения рвутся | Сайт ограничивает частоту: увеличьте `DA_EDISCLOSURE_MIN_INTERVAL` до 3-5 и запустите снова — прогресс сохранён |
 | Кракозябры в консоли | Шаг 3 (`chcp 65001`, `PYTHONUTF8=1`) |
@@ -147,6 +148,34 @@ Cookies проверки живут ограниченное время; ког�
 
 Если `discover` сообщает, что отвечает только хост с `www.`, задайте
 `$env:DA_EDISCLOSURE_BASE_URL = "https://www.e-disclosure.ru"`.
+
+## Режим браузера (рекомендуется)
+
+Сайт закрыт проверкой браузера, и cookies после неё живут недолго. Надёжнее не копировать их вручную,
+а ходить настоящим Chromium: он проходит проверку сам, а дальше запросы идут через его же сетевой стек.
+
+Установка (один раз):
+```powershell
+pip install playwright
+playwright install chromium
+```
+
+Использование: добавьте `--browser` к сетевым командам.
+```powershell
+disclosure-alpha discover --browser
+disclosure-alpha companies --browser
+disclosure-alpha messages --from 2024-01-01 --till 2024-03-31 --categories insider_stake_change --fetch-company-info --browser
+disclosure-alpha events --categories insider_stake_change --browser
+```
+Чтобы режим включался всегда, задайте `$env:DA_BROWSER = "1"`.
+
+Полезные детали:
+* Профиль браузера хранится в `data\browser_profile\`, поэтому пройденная проверка переживает перезапуск команды.
+* Если проверка требует ручного действия (капча), запустите с видимым окном: `--show-browser`,
+  пройдите проверку в открывшемся окне, дальше команда продолжит сама.
+* Окно не нужно держать открытым: команда закрывает браузер по завершении.
+* Скорость: сбор через браузер медленнее обычных запросов, но кеш (`data\cache\`) работает так же,
+  поэтому повторные прогоны почти бесплатны.
 
 ## Чего не делать
 Не копируйте скачанные страницы сайта в репозиторий и не пересылайте их: в заглушке защиты лежит

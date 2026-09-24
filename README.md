@@ -22,6 +22,7 @@
 | Event study (CAR/BHAR, рыночная модель, бутстрап, портфель в календарном времени, скрининг с BH-FDR) | готов, тесты на синтетике с известным эффектом |
 | Бэктест (издержки, лимит участия в обороте, walk-forward, плацебо) и отчёты | готов |
 | Сквозной прогон `demo` на синтетике с известным эффектом | проходит: скрининг находит эффект только там, где он вшит ([docs/demo](docs/demo/README.md)) |
+| Режим сбора через настоящий браузер (Playwright + Chromium) | готов: сам проходит JS-проверку сайта, проверен на локальном стенде с такой же проверкой |
 | **Живые данные** | не собраны. Сайт закрыт проверкой браузера: без cookies из браузера отдаётся страница-заглушка (`discover` это распознаёт). Порядок обхода -- в [docs/windows_quickstart.md](docs/windows_quickstart.md), раздел «Cookies браузера» |
 
 ## Сеть — важно прочитать
@@ -47,7 +48,8 @@
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,browser]"   # browser -- режим обхода JS-проверки сайта
+playwright install chromium  # только для режима --browser
 python -m pytest -q          # все тесты офлайн
 disclosure-alpha demo        # сквозной прогон на синтетических данных -> data/reports/demo/
 ```
@@ -57,7 +59,7 @@ disclosure-alpha demo        # сквозной прогон на синтети
 ## Порядок запуска на живых данных
 
 ```bash
-disclosure-alpha discover                                   # 1. структура сайта, проверка доступа
+disclosure-alpha discover --browser                          # 1. структура сайта (--browser проходит JS-проверку сайта)
 disclosure-alpha companies                                  # 2. справочник акций MOEX (ISS) + id компаний e-disclosure по ИНН
 disclosure-alpha messages --from 2015-01-01 --till 2026-09-01 \
     --categories insider_stake_change --fetch-company-info  # 3a. сообщения об изменении доли по всему рынку

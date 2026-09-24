@@ -67,6 +67,19 @@ def _latin1_safe(value: str) -> bool:
         return False
 
 
+_PLACEHOLDER_VALUE_RE = re.compile(r"^[.x\s]*$", re.I)
+
+
+def _looks_like_placeholder(name: str, value: str) -> bool:
+    """Значения вроде ``...`` или имена с ``xxxx`` остались из шаблона cookies.example.txt."""
+    return bool(_PLACEHOLDER_VALUE_RE.match(value or "")) or "xxxx" in name.lower()
+
+
+def has_placeholder_cookies(pairs: list[tuple[str, str]]) -> list[str]:
+    """Имена cookies, значения которых остались шаблонными."""
+    return [n for n, v in pairs if _looks_like_placeholder(n, v)]
+
+
 def _strip_comments(text: str) -> str:
     return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
 
@@ -125,6 +138,10 @@ def parse_cookie_file(path: Path, default_domain: str = "e-disclosure.ru") -> tu
             skipped += 1
             continue
         pairs.append((name, value))
+    placeholders = [n for n, v in pairs if _looks_like_placeholder(n, v)]
+    if placeholders:
+        log.warning("в %s значения выглядят шаблонными (%s): подставьте настоящие из браузера",
+                    path, ", ".join(placeholders))
     if skipped:
         log.warning("в %s пропущено фрагментов, не похожих на cookie: %d (проверьте, что вставлена строка заголовка Cookie)",
                     path, skipped)
@@ -200,6 +217,45 @@ def _cache_key(method: str, url: str, params: Optional[Mapping], data: Optional[
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
+class DiskCache:
+    """Простой файловый кеш ответов: <dir>/<2 символа хеша>/<хеш>.bin + .json (мета)."""
+
+    def __init__(self, cache_dir: Optional[Path], ttl_sec: Optional[float] = None):
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.ttl_sec = ttl_sec
+
+    def _paths(self, key: str) -> tuple[Path, Path]:
+        assert self.cache_dir is not None
+        d = self.cache_dir / key[:2]
+        return d / f"{key}.bin", d / f"{key}.json"
+
+    def get(self, key: str) -> Optional["FetchResult"]:
+        if not self.cache_dir:
+            return None
+        bin_path, meta_path = self._paths(key)
+        if not (bin_path.exists() and meta_path.exists()):
+            return None
+        try:
+            meta = json.loads(meta_path.read_text("utf-8"))
+        except (OSError, ValueError):
+            return None
+        if self.ttl_sec is not None and time.time() - meta.get("fetched_at", 0) > self.ttl_sec:
+            return None
+        return FetchResult(url=meta.get("url", ""), status=int(meta.get("status", 200)),
+                           content=bin_path.read_bytes(), headers=meta.get("headers", {}),
+                           from_cache=True, encoding=meta.get("encoding"))
+
+    def put(self, key: str, res: "FetchResult") -> None:
+        if not self.cache_dir or not res.ok:
+            return
+        bin_path, meta_path = self._paths(key)
+        bin_path.parent.mkdir(parents=True, exist_ok=True)
+        bin_path.write_bytes(res.content)
+        meta_path.write_text(json.dumps({"url": res.url, "status": res.status, "headers": res.headers,
+                                         "encoding": res.encoding, "fetched_at": time.time()},
+                                        ensure_ascii=False), "utf-8")
+
+
 class HttpClient:
     """Синхронный клиент поверх requests.Session.
 
@@ -228,6 +284,7 @@ class HttpClient:
         self.max_retries = max_retries
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.cache_ttl_sec = cache_ttl_sec
+        self._cache = DiskCache(self.cache_dir, cache_ttl_sec)
         self.session = session or requests.Session()
         if browser_headers:
             self.session.headers.update(BROWSER_HEADERS)
@@ -235,12 +292,14 @@ class HttpClient:
         if extra_headers:
             self.session.headers.update(dict(extra_headers))
         self.cookies_loaded = 0
+        self.placeholder_cookies: list[str] = []
         if cookies_file and Path(cookies_file).exists():
             try:
                 pairs, file_ua = parse_cookie_file(Path(cookies_file))
                 for name, value in pairs:
                     self.session.cookies.set(name, value, domain=".e-disclosure.ru", path="/")
                 self.cookies_loaded = len(pairs)
+                self.placeholder_cookies = has_placeholder_cookies(pairs)
                 if pairs:
                     log.info("имена cookies: %s", ", ".join(n for n, _ in pairs))
                 if file_ua:
@@ -256,38 +315,11 @@ class HttpClient:
         self.stats = {"requests": 0, "cache_hits": 0, "retries": 0}
 
     # ------------------------------------------------------------------ cache
-    def _cache_paths(self, key: str) -> tuple[Path, Path]:
-        assert self.cache_dir is not None
-        d = self.cache_dir / key[:2]
-        return d / f"{key}.bin", d / f"{key}.json"
-
     def _cache_get(self, key: str) -> Optional[FetchResult]:
-        if not self.cache_dir:
-            return None
-        bin_path, meta_path = self._cache_paths(key)
-        if not (bin_path.exists() and meta_path.exists()):
-            return None
-        try:
-            meta = json.loads(meta_path.read_text("utf-8"))
-        except (OSError, ValueError):
-            return None
-        if self.cache_ttl_sec is not None and time.time() - meta.get("fetched_at", 0) > self.cache_ttl_sec:
-            return None
-        return FetchResult(
-            url=meta.get("url", ""), status=int(meta.get("status", 200)), content=bin_path.read_bytes(),
-            headers=meta.get("headers", {}), from_cache=True, encoding=meta.get("encoding"),
-        )
+        return self._cache.get(key)
 
     def _cache_put(self, key: str, res: FetchResult) -> None:
-        if not self.cache_dir or not res.ok:
-            return
-        bin_path, meta_path = self._cache_paths(key)
-        bin_path.parent.mkdir(parents=True, exist_ok=True)
-        bin_path.write_bytes(res.content)
-        meta_path.write_text(json.dumps({
-            "url": res.url, "status": res.status, "headers": res.headers,
-            "encoding": res.encoding, "fetched_at": time.time(),
-        }, ensure_ascii=False), "utf-8")
+        self._cache.put(key, res)
 
     # ---------------------------------------------------------------- request
     def _throttle(self) -> None:

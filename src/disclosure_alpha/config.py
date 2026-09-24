@@ -33,6 +33,11 @@ class Settings:
     iss_board: str = field(default_factory=lambda: _env("ISS_BOARD", "TQBR"))
     market_index: str = field(default_factory=lambda: _env("MARKET_INDEX", "IMOEX"))
 
+    # --- браузерный режим (обход JS-проверки) ---
+    use_browser: bool = field(default_factory=lambda: _env("BROWSER", "0") not in ("0", "", "false", "no"))
+    browser_headless: bool = field(default_factory=lambda: _env("BROWSER_HEADLESS", "1") not in ("0", "false", "no"))
+    browser_warmup_timeout_sec: float = field(default_factory=lambda: float(_env("BROWSER_WARMUP_TIMEOUT", "60")))
+
     # --- HTTP ---
     user_agent: str = field(default_factory=lambda: _env(
         "USER_AGENT",
@@ -68,6 +73,11 @@ class Settings:
     @property
     def discovery_dir(self) -> Path:
         return self.data_dir / "discovery"
+
+    @property
+    def browser_profile_dir(self) -> Path:
+        """Постоянный профиль Chromium: cookies проверки переживают перезапуск команды."""
+        return self.data_dir / "browser_profile"
 
     def ensure_dirs(self) -> None:
         for p in (self.raw_dir, self.cache_dir, self.processed_dir, self.prices_dir, self.reports_dir, self.discovery_dir):

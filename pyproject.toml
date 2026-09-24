@@ -22,6 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-cov>=4"]
+browser = ["playwright>=1.40"]          # режим --browser: обход JS-проверки сайта
 
 [project.scripts]
 disclosure-alpha = "disclosure_alpha.cli:main"
