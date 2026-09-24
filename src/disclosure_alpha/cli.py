@@ -130,6 +130,32 @@ def cmd_probe_search(args):
     print(f"подробности: {(Path(args.out) if args.out else settings.discovery_dir) / 'search_probe.json'}")
 
 
+def cmd_probe_types(args):
+    """Сверяет идентификаторы типов сообщений и проверяет, какие из них понимает поиск сайта."""
+    settings = load_settings()
+    args.browser = True
+    client = _ed_client(args, settings)
+    try:
+        summary = client.probe_event_types(args.category, _date(args.date_from), _date(args.date_till),
+                                           Path(args.out) if args.out else None)
+    finally:
+        client.close()
+    print(f"категория: {summary['category']}")
+    print(f"типов в форме: {summary['form_options_total']}, в справочнике сайта: {summary['api_types_total']}")
+    print("совпало в форме:")
+    for value, label in summary["form_matched"][:10]:
+        print(f"  {value}: {label[:100]}")
+    print("совпало в справочнике:")
+    for value, name in summary["api_matched"][:10]:
+        print(f"  {value}: {name[:100]}")
+    print("найдено сообщений:")
+    for key, n in summary["counts"].items():
+        print(f"  {key}: {n}")
+    for pl in summary.get("page_payloads", []):
+        print(f"страница отправила: {pl['post_data'][:600]}")
+    print(f"подробности: {(Path(args.out) if args.out else settings.discovery_dir) / 'event_types_probe.json'}")
+
+
 def cmd_companies(args):
     from .pipeline import build_universe
     settings = load_settings()
@@ -258,6 +284,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--event-types", help="идентификаторы типов сообщений через запятую (из discovery.json)")
     s.add_argument("--out")
     s.set_defaults(func=cmd_probe_search)
+
+    s = add_browser_flag(sub.add_parser("probe-types", help="сверить идентификаторы типов сообщений с поиском сайта"))
+    s.add_argument("--category", default="insider_stake_change", help="категория из config/event_types.yaml")
+    s.add_argument("--from", dest="date_from", required=True)
+    s.add_argument("--till", dest="date_till", required=True)
+    s.add_argument("--out")
+    s.set_defaults(func=cmd_probe_types)
 
     s = add_browser_flag(sub.add_parser("companies", help="справочник акций MOEX (ISS) + сопоставление с компаниями e-disclosure по ИНН"))
     s.add_argument("--limit", type=int)

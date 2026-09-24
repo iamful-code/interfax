@@ -441,6 +441,60 @@ class EDisclosureClient:
             rows = parsers.parse_message_list(res.text, self.base_url)
         return rows, res.text
 
+    def probe_event_types(self, category: str, date_from: date, date_till: date,
+                          out_dir: Optional[Path] = None) -> dict:
+        """Сверяет идентификаторы типов сообщений из формы и из справочника сайта и проверяет, какие работают.
+
+        Возвращает сводку: сколько сообщений находит поиск с каждым набором идентификаторов и что
+        именно отправляет сама страница, когда типы выбраны мышью.
+        """
+        from .taxonomy import default_taxonomy
+
+        out_dir = Path(out_dir or self.settings.discovery_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        tx = default_taxonomy()
+        tr = self.http
+
+        form_opts = self.event_type_options()
+        form_matched = [(str(o["value"]), o.get("label", "")) for o in form_opts
+                        if tx.classify_name(o.get("label", "")) == category]
+        try:
+            api_types = self.fetch_event_types()
+        except Exception as e:  # noqa: BLE001
+            log.warning("справочник типов недоступен: %s", e)
+            api_types = []
+        api_matched = [(str(t["id"]), t.get("name", "")) for t in api_types
+                       if tx.classify_name(t.get("name", "")) == category]
+
+        summary: dict = {"category": category, "date_from": str(date_from), "date_till": str(date_till),
+                         "form_options_total": len(form_opts), "api_types_total": len(api_types),
+                         "form_matched": form_matched[:20], "api_matched": api_matched[:20], "counts": {}}
+
+        rows, _ = self.search_api(date_from, date_till, use_cache=False)
+        summary["counts"]["без фильтра"] = len(rows)
+        if form_matched:
+            rows, _ = self.search_api(date_from, date_till, [i for i, _ in form_matched], use_cache=False)
+            summary["counts"]["идентификаторы формы"] = len(rows)
+        if api_matched:
+            rows, _ = self.search_api(date_from, date_till, [i for i, _ in api_matched], use_cache=False)
+            summary["counts"]["идентификаторы справочника"] = len(rows)
+
+        # как выглядит запрос, когда типы выбраны на странице мышью
+        chosen = [i for i, _ in (form_matched or api_matched)][:5]
+        if chosen:
+            tr.start_recording()
+            try:
+                rows, _ = self.search_via_form(date_from, date_till, chosen)
+                summary["counts"]["выбор на странице"] = len(rows)
+            except Exception as e:  # noqa: BLE001
+                summary["counts"]["выбор на странице"] = f"ошибка: {e}"
+            summary["page_payloads"] = [
+                {"url": r["url"], "post_data": r.get("post_data", "")}
+                for r in tr.recorded_requests() if API_SEARCH_PATH in r["url"]]
+        (out_dir / "event_types_probe.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2, default=str), "utf-8")
+        return summary
+
     def probe_search(self, date_from: date, date_till: date, event_type_ids: Optional[Iterable[str]] = None,
                      out_dir: Optional[Path] = None) -> dict:
         """Разведка результатов поиска: выполняет запрос через форму и описывает разметку ответа."""
