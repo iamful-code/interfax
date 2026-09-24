@@ -156,6 +156,8 @@ class BrowserTransport:
         self._page = None
         self._last_request_ts = 0.0
         self.cookies_loaded = 0
+        self._recorded: list[dict] = []
+        self._response_handler = None
         self.stats = {"requests": 0, "cache_hits": 0, "retries": 0, "warmups": 0}
         self.session = _HeaderShim({"User-Agent": user_agent or ""})
 
@@ -237,7 +239,11 @@ class BrowserTransport:
                 return self.user_agent or ""
             raise
 
+    def _reset_recording(self) -> None:
+        self._response_handler = None
+
     def _close_browser(self) -> None:
+        self._reset_recording()
         for obj in (self._context, self._browser):
             if obj is not None:
                 try:
@@ -572,6 +578,39 @@ class BrowserTransport:
             if self.count(sel) and self.js_click(sel):
                 closed.append(sel)
         return closed
+
+    # ------------------------------------------------------------------ запись сетевых обменов
+    ANALYTICS_HOSTS = ("mc.yandex.ru", "top100.ru", "top-fwz1.mail.ru", "yandex.ru/ads", "google-analytics",
+                       "googletagmanager", "doubleclick", "vk.com", "criteo", "adfox")
+
+    def start_recording(self) -> None:
+        """Начинает записывать запросы страницы: так видно, какой адрес вызывает форма."""
+        self._ensure_started()
+        self._recorded = []
+        if self._response_handler is None:
+            def _on_response(resp):
+                try:
+                    req = resp.request
+                    self._recorded.append({
+                        "url": resp.url, "method": req.method, "status": resp.status,
+                        "resource_type": req.resource_type,
+                        "content_type": (resp.headers or {}).get("content-type", ""),
+                        "post_data": (req.post_data or "")[:1000],
+                    })
+                except Exception:  # noqa: BLE001 -- запись диагностики не должна ничему мешать
+                    pass
+            self._response_handler = _on_response
+            self._page.on("response", _on_response)
+
+    def recorded_requests(self, skip_analytics: bool = True, types: tuple[str, ...] = ("xhr", "fetch", "document")) -> list[dict]:
+        out = []
+        for r in getattr(self, "_recorded", []):
+            if types and r.get("resource_type") not in types:
+                continue
+            if skip_analytics and any(h in r["url"] for h in self.ANALYTICS_HOSTS):
+                continue
+            out.append(r)
+        return out
 
     def list_clickables(self, limit: int = 60) -> list[dict]:
         """Кнопки и ссылки-кнопки на странице -- для диагностики, когда нужный элемент не найден."""

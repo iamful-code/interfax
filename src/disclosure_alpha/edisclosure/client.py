@@ -292,7 +292,9 @@ class EDisclosureClient:
                                "form button[type=submit]", "form input[type=submit]",
                                "button[type=submit]", "input[type=submit]")
     CONFIRM_BUTTON_SELECTORS = ("#sEventSearchForm__button-confirm", ".sEventSearchForm__button-confirm")
-    RESULTS_SELECTORS = ("a[href*='EventId']", "a[href*='/event/']", "table tbody tr", ".searchResult", "[class*=result] a")
+    # ждать нужно именно ссылки на сообщения: таблицы на странице есть и до поиска (дерево типов, календарь)
+    RESULTS_SELECTORS = ("a[href*='EventId']", "a[href*='/event/']", "a[href*='soobshhenie']",
+                         "a[href*='/message']", "#searchResults a", "[class*=searchResult] a")
 
     def search_via_form(self, date_from: date, date_till: date, event_type_ids: Optional[Iterable[str]] = None,
                         query: Optional[str] = None, wait_selector: Optional[str] = None) -> tuple[list[MessageRow], str]:
@@ -329,7 +331,7 @@ class EDisclosureClient:
                             "не найдена кнопка поиска. Видимые кнопки на странице: "
                             + "; ".join(f"{c['tag']}#{c['id']}.{c['cls']} {c['text']!r}" for c in visible[:10]))
         log.info("нажата кнопка поиска: %s", clicked)
-        tr.wait_for_selector(wait_selector or ", ".join(self.RESULTS_SELECTORS), timeout_ms=30_000)
+        tr.wait_for_selector(wait_selector or ", ".join(self.RESULTS_SELECTORS), timeout_ms=20_000)
         html = tr.current_html()
         return parsers.parse_search_results(html, self.base_url), html
 
@@ -346,13 +348,16 @@ class EDisclosureClient:
         """Разведка результатов поиска: выполняет запрос через форму и описывает разметку ответа."""
         out_dir = Path(out_dir or self.settings.discovery_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
+        self.http.start_recording()
         rows, html = self.search_via_form(date_from, date_till, event_type_ids)
         (out_dir / "search_results.html").write_text(html, "utf-8")
+        requests_log = self.http.recorded_requests()
         summary = {"date_from": str(date_from), "date_till": str(date_till),
                    "event_type_ids": list(event_type_ids or []), "rows_parsed": len(rows),
                    "sample": [r.to_dict() for r in rows[:5]], "dom": parsers.describe_dom(html),
                    "field_names": self.http.field_names(), "clickables": self.http.list_clickables(30),
-                   "page_url": getattr(self.http, "_page", None) and self.http._page.url}
+                   "page_url": getattr(self.http, "_page", None) and self.http._page.url,
+                   "requests": requests_log}
         (out_dir / "search_probe.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), "utf-8")
         return summary
 

@@ -108,7 +108,16 @@ def cmd_probe_search(args):
         print(f"частые классы: {dom['top_classes'][:15]}")
     if dom.get("buttons"):
         print(f"кнопки: {[(b.get('id') or b.get('text')) for b in dom['buttons'][:10]]}")
+    print(f"адрес страницы результата: {summary.get('page_url')}")
     print(f"имена полей на странице: {summary['field_names'][:25]}")
+    reqs = summary.get("requests") or []
+    if reqs:
+        print("запросы страницы после нажатия «Найти»:")
+        for r in reqs[:15]:
+            post = f" данные={r['post_data'][:160]}" if r.get("post_data") else ""
+            print(f"  {r['method']} {r['status']} {r['resource_type']} {r['url'][:140]}{post}")
+    else:
+        print("страница не отправила ни одного запроса после нажатия (результат уже был на странице?)")
     for row in summary["sample"]:
         print(f"  пример строки: {row}")
     print(f"подробности: {(Path(args.out) if args.out else settings.discovery_dir) / 'search_probe.json'}")

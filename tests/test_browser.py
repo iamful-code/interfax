@@ -412,3 +412,17 @@ def test_list_clickables_and_count(transport, server):
     assert transport.count("#nope") == 0
     items = transport.list_clickables()
     assert any(i["id"] == "sEventSearchForm__button-search" for i in items)
+
+
+def test_records_requests_made_by_the_page(transport, server, tmp_path):
+    """Запись сетевых обменов показывает, какой адрес вызывает форма (и что она отправляет)."""
+    from disclosure_alpha.config import Settings
+    from disclosure_alpha.edisclosure.client import EDisclosureClient
+
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    client = EDisclosureClient(Settings(data_dir=tmp_path / "data", edisclosure_base_url=base), http=transport)
+    summary = client.probe_search(date(2024, 3, 14), date(2024, 3, 15), out_dir=tmp_path / "probe")
+    urls = [r["url"] for r in summary["requests"]]
+    assert any("/poisk-po-soobshheniyam" in u for u in urls)          # переход на страницу поиска записан
+    assert all(r["resource_type"] in ("xhr", "fetch", "document") for r in summary["requests"])
+    assert summary["page_url"].startswith(base)
