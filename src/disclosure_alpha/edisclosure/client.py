@@ -83,6 +83,10 @@ class EDisclosureClient:
             return self._form
         res = self.http.get(self.url(SEARCH_PATH), use_cache=False)
         self._search_html = res.text
+        if is_protection_stub(res.text):
+            raise HttpError(res.url, res.status,
+                            "страница поиска отдаёт заглушку антибот-защиты; нужны cookies браузера в config/cookies.txt",
+                            body=res.text)
         self._form = parsers.parse_search_form(res.text, self.base_url)
         if self._form is None:
             log.warning("форма поиска не найдена на %s (возможно, рендерится JS) -- используем FIELD_MAP как есть", SEARCH_PATH)
@@ -98,6 +102,13 @@ class EDisclosureClient:
         try:
             res = self.http.get(url, params=params, use_cache=False)
             (out_dir / f"{name}.html").write_text(res.text, "utf-8")
+            if is_protection_stub(res.text):
+                return None, {"status": "заглушка антибот-защиты (HTTP 200, но контента нет)",
+                              "http_status": res.status, "url": res.url, "stub": True,
+                              "saved_file": str(out_dir / f"{name}.html"),
+                              "diagnosis": "JS-проверка браузера (Servicepipe): страница отдаёт спиннер и скрипт, "
+                                           "который выставляет cookies spjs/spsc/spid. Нужны cookies из браузера -- "
+                                           "см. docs/windows_quickstart.md, раздел «Cookies браузера»"}
             return res.text, {"status": "ok", "http_status": res.status, "url": res.url}
         except HttpError as e:
             info: dict = {"status": f"error: HTTP {e.status}", "http_status": e.status, "url": url}
@@ -207,6 +218,7 @@ class EDisclosureClient:
             payload[fm["query_id"]] = str(query_id)
         if event_type_ids:
             payload[fm["event_types"]] = [str(x) for x in event_type_ids]
+        payload.pop(fm.get("page_size_alias", ""), None)
         # радио-кнопки: значения по умолчанию (checked)
         if form:
             for name, opts in form.radio_groups.items():
@@ -220,16 +232,37 @@ class EDisclosureClient:
                     query_id: Optional[int] = None, use_cache: bool = True) -> tuple[list[MessageRow], str]:
         """Одна страница результатов поиска. Возвращает (строки, html)."""
         payload = self._build_search_payload(date_from, date_till, page, page_size, event_type_ids, query, query_id)
+        res = self._send_search(payload, use_cache)
+        if is_protection_stub(res.text):
+            raise HttpError(res.url, res.status, "получена заглушка антибот-защиты: обновите config/cookies.txt", body=res.text)
+        rows = parsers.parse_search_results(res.text, self.base_url)
+        return rows, res.text
+
+    def _send_search(self, payload: dict, use_cache: bool, _retry: bool = True):
+        """Отправка формы поиска. При отказе из-за устаревшего antiforgery-токена перечитывает форму и повторяет."""
         form = self._form
         action = form.action if form and form.action else self.url(SEARCH_PATH)
         method = (form.method if form else "post").upper()
-        if method == "GET":
-            res = self.http.request("GET", action, params=payload, use_cache=use_cache)
-        else:
-            res = self.http.request("POST", action, data=payload, use_cache=use_cache,
-                                    headers={"Referer": self.url(SEARCH_PATH), "X-Requested-With": "XMLHttpRequest"})
-        rows = parsers.parse_search_results(res.text, self.base_url)
-        return rows, res.text
+        headers = {"Referer": self.url(SEARCH_PATH), "Sec-Fetch-Site": "same-origin", "Origin": self.base_url}
+        token = next((v for k, v in payload.items() if "requestverificationtoken" in k.lower()), None)
+        if token:
+            headers["RequestVerificationToken"] = token          # ASP.NET Core принимает токен и заголовком
+        try:
+            if method == "GET":
+                return self.http.request("GET", action, params=payload, use_cache=use_cache, headers=headers)
+            return self.http.request("POST", action, data=payload, use_cache=use_cache, headers=headers)
+        except HttpError as e:
+            if _retry and e.status in (400, 403, 419):
+                log.info("поиск отклонён (HTTP %s) -- перечитываем форму и повторяем", e.status)
+                self._load_search_form(force=True)
+                fresh = self._form
+                retry_payload = dict(payload)          # не меняем словарь вызывающего
+                if fresh:
+                    for k, v in fresh.fields.items():
+                        if "requestverificationtoken" in k.lower() or k not in retry_payload:
+                            retry_payload[k] = v
+                return self._send_search(retry_payload, use_cache, _retry=False)
+            raise
 
     def iter_search(self, date_from: date, date_till: date, chunk_days: int = 1,
                     event_type_ids: Optional[Iterable[str]] = None, query: Optional[str] = None,
@@ -311,8 +344,26 @@ def alternate_host(base_url: str) -> str:
     return urlunsplit((parts.scheme, host, "", "", ""))
 
 
+# Признаки страницы-заглушки антибот-защиты: контента нет, есть спиннер/блок капчи и обфусцированный скрипт,
+# который вычисляет cookies (у e-disclosure -- Servicepipe: cookies spjs/spsc/spid) и перезагружает страницу.
+_STUB_MARKERS = ("id_captcha_frame_div", "spinner-container", "id_spinner", "__sp_init", "spsc=")
+
+
+def is_protection_stub(html: str) -> bool:
+    """True, если вместо страницы сайта пришла заглушка проверки браузера."""
+    if not html:
+        return False
+    head = html[:40_000].lower()
+    if any(m.lower() in head for m in _STUB_MARKERS):
+        return True
+    no_links = "<a " not in html.lower()
+    js_redirect = 'http-equiv="refresh"' in head and "<noscript>" in head
+    return no_links and js_redirect and "<script" in head
+
+
 _PROTECTION_MARKERS = [
     (r"ddos-guard|__ddg", "DDoS-Guard (JS-проверка браузера)"),
+    (r"id_captcha_frame_div|spsc=|spjs=|__sp_init", "Servicepipe (JS-проверка браузера, cookies spjs/spsc/spid)"),
     (r"qrator", "Qrator (антибот-проверка)"),
     (r"variti", "Variti (антибот-проверка)"),
     (r"servicepipe", "Servicepipe (антибот-проверка)"),

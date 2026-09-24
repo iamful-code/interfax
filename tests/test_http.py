@@ -44,3 +44,25 @@ def test_load_cookies_netscape_and_header_formats(tmp_path):
 
     client = HttpClient(min_interval_sec=0, session=FakeSession([]), cookies_file=netscape)
     assert client.cookies_loaded == 2
+
+
+def test_parse_cookie_file_with_user_agent_and_wrapped_value(tmp_path):
+    from disclosure_alpha.http import client_hints, parse_cookie_file
+
+    f = tmp_path / "cookies.txt"
+    f.write_text(
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36\n"
+        "cookie: spjs=abc+de/fg\n   h==; spsc=xyz_1; .AspNetCore.Antiforgery.tl_x=CfDJ8D2\n", "utf-8")
+    pairs, ua = parse_cookie_file(f)
+    assert ua.endswith("Chrome/152.0.0.0 Safari/537.36")
+    assert dict(pairs)["spjs"] == "abc+de/fgh=="          # перенос строки внутри значения убран
+    assert dict(pairs)["spsc"] == "xyz_1"
+    assert ".AspNetCore.Antiforgery.tl_x" in dict(pairs)
+
+    client = HttpClient(min_interval_sec=0, session=FakeSession([]), cookies_file=f,
+                        user_agent="disclosure-alpha/0.1")
+    assert client.cookies_loaded == 3
+    assert client.session.headers["User-Agent"].endswith("Chrome/152.0.0.0 Safari/537.36")   # UA из файла побеждает
+    assert client.session.headers["sec-ch-ua-platform"] == '"Windows"'
+    assert 'v="152"' in client.session.headers["sec-ch-ua"]
+    assert client_hints("curl/8") == {}

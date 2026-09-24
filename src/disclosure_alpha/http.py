@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import http.cookiejar
 import json
+import re
 import logging
 import time
 from dataclasses import dataclass
@@ -51,34 +52,78 @@ def decode_body(content: bytes, encoding: Optional[str]) -> str:
     return content.decode("cp1251", errors="replace") if b"\xd0" not in content[:2000] else content.decode("utf-8", errors="replace")
 
 
-def load_cookies(session: requests.Session, path: Path, default_domain: str = "e-disclosure.ru") -> int:
-    """Загружает cookies из файла: формат Netscape (cookies.txt) или одна строка заголовка Cookie.
+_UA_LINE_RE = re.compile(r"^\s*user-agent\s*:\s*(.+?)\s*$", re.I | re.M)
+_COOKIE_LINE_RE = re.compile(r"^\s*cookie\s*:\s*", re.I)
 
-    Возвращает число загруженных cookies. Строка вида ``a=1; b=2`` (например, скопированная из DevTools)
-    привязывается к default_domain и его поддоменам.
+
+def parse_cookie_file(path: Path, default_domain: str = "e-disclosure.ru") -> tuple[list[tuple[str, str]], Optional[str]]:
+    """Разбирает «профиль браузера»: cookies + (необязательно) строку User-Agent.
+
+    Поддерживаются два формата:
+    * файл Netscape ``cookies.txt`` (расширения «Get cookies.txt»);
+    * текст, скопированный из DevTools: строка ``a=1; b=2`` (допустим префикс ``Cookie:``),
+      плюс отдельная строка ``User-Agent: ...`` -- тогда UA берётся из файла.
+
+    Возвращает (список пар имя/значение, user_agent или None). Пробелы внутри значений убираются:
+    при копировании длинные значения часто переносятся по строкам.
     """
     path = Path(path)
-    text = path.read_text("utf-8", errors="replace").strip()
+    text = path.read_text("utf-8", errors="replace")
+    ua_match = _UA_LINE_RE.search(text)
+    user_agent = ua_match.group(1) if ua_match else None
+    if ua_match:
+        text = text[:ua_match.start()] + text[ua_match.end():]
+    text = text.strip()
     if not text:
-        return 0
-    if text.startswith("# Netscape") or text.startswith("# HTTP Cookie File") or "\t" in text.splitlines()[0]:
-        jar = http.cookiejar.MozillaCookieJar(str(path))
-        jar.load(ignore_discard=True, ignore_expires=True)
-        n = 0
-        for c in jar:
-            session.cookies.set_cookie(c)
-            n += 1
-        return n
-    n = 0
-    for part in text.split(";"):
+        return [], user_agent
+
+    first_line = text.splitlines()[0]
+    if text.startswith("# Netscape") or text.startswith("# HTTP Cookie File") or "\t" in first_line:
+        jar = http.cookiejar.MozillaCookieJar()
+        tmp = path
+        if ua_match:  # файл содержал строку UA -- MozillaCookieJar её не поймёт, пишем во временный
+            tmp = path.with_suffix(path.suffix + ".clean")
+            tmp.write_text(text + "\n", "utf-8")
+        try:
+            jar.load(str(tmp), ignore_discard=True, ignore_expires=True)
+        finally:
+            if tmp is not path:
+                tmp.unlink(missing_ok=True)
+        return [(c.name, c.value or "") for c in jar], user_agent
+
+    pairs: list[tuple[str, str]] = []
+    for part in _COOKIE_LINE_RE.sub("", text).split(";"):
         if "=" not in part:
             continue
-        name, value = part.strip().split("=", 1)
+        name, value = part.split("=", 1)
+        name = name.strip()
         if not name:
             continue
-        session.cookies.set(name.strip(), value.strip(), domain="." + default_domain.lstrip("."), path="/")
-        n += 1
-    return n
+        pairs.append((name, re.sub(r"\s+", "", value)))
+    return pairs, user_agent
+
+
+def load_cookies(session: requests.Session, path: Path, default_domain: str = "e-disclosure.ru") -> int:
+    """Кладёт cookies из файла в сессию (домен по умолчанию -- default_domain и его поддомены)."""
+    pairs, _ = parse_cookie_file(path, default_domain)
+    domain = "." + default_domain.lstrip(".")
+    for name, value in pairs:
+        session.cookies.set(name, value, domain=domain, path="/")
+    return len(pairs)
+
+
+def client_hints(user_agent: str) -> dict:
+    """Заголовки Sec-CH-UA, согласованные с версией Chrome в User-Agent (их проверяют антибот-системы)."""
+    m = re.search(r"Chrome/(\d+)", user_agent or "")
+    if not m:
+        return {}
+    v = m.group(1)
+    platform = '"Windows"' if "Windows" in user_agent else ('"macOS"' if "Mac OS" in user_agent else '"Linux"')
+    return {
+        "sec-ch-ua": f'"Chromium";v="{v}", "Not?A_Brand";v="24", "Google Chrome";v="{v}"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": platform,
+    }
 
 
 @dataclass
@@ -164,10 +209,19 @@ class HttpClient:
         self.cookies_loaded = 0
         if cookies_file and Path(cookies_file).exists():
             try:
-                self.cookies_loaded = load_cookies(self.session, Path(cookies_file))
-                log.info("загружено cookies из %s: %d", cookies_file, self.cookies_loaded)
+                pairs, file_ua = parse_cookie_file(Path(cookies_file))
+                for name, value in pairs:
+                    self.session.cookies.set(name, value, domain=".e-disclosure.ru", path="/")
+                self.cookies_loaded = len(pairs)
+                if file_ua:
+                    # UA из того же браузера, что и cookies: защита часто связывает их между собой
+                    self.session.headers["User-Agent"] = file_ua
+                log.info("загружено cookies из %s: %d%s", cookies_file, self.cookies_loaded,
+                         " (User-Agent взят из файла)" if file_ua else "")
             except Exception as exc:  # noqa: BLE001
                 log.warning("не удалось загрузить cookies из %s: %s", cookies_file, exc)
+        if browser_headers:
+            self.session.headers.update(client_hints(self.session.headers.get("User-Agent", "")))
         self._last_request_ts = 0.0
         self.stats = {"requests": 0, "cache_hits": 0, "retries": 0}
 

@@ -4,6 +4,13 @@ data/*
 *.parquet
 *.sqlite
 .cache/
+# секреты и локальные настройки доступа
+config/cookies.txt
+config/edisclosure_form.json
+# скачанные «живые» страницы: содержат обфусцированный сторонний скрипт защиты -- в репозиторий не кладём
+tests/fixtures/live/
+data/discovery/
+
 # python
 __pycache__/
 *.py[cod]

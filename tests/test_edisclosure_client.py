@@ -138,3 +138,56 @@ def test_discover_captures_error_pages_and_tries_alternate_host(tmp_path):
     # в quick-режиме на 503 делается не больше одного повтора на URL
     calls_503 = [c for c in session.calls if c["url"].startswith("https://e-disclosure.ru/poisk")]
     assert len(calls_503) == 2
+
+
+STUB_HTML = """<!DOCTYPE html><html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<noscript><meta http-equiv="refresh" content="0; url=/exhkqyad"></noscript></head>
+<body><div id="id_spinner" class="spinner-container"></div>
+<div id="id_captcha_frame_div" style="display: none;"></div>
+<script type="text/javascript">!function(){var a=atob("x");}()</script></body></html>"""
+
+
+def test_discover_reports_protection_stub(tmp_path):
+    from disclosure_alpha.edisclosure.client import is_protection_stub
+
+    assert is_protection_stub(STUB_HTML)
+    assert not is_protection_stub(read_fixture("edisclosure_search_page.html"))
+
+    rules = [(lambda m, url, p, d: True, lambda *a: (200, STUB_HTML))]
+    client, _ = _client(tmp_path, rules)
+    out = tmp_path / "disc"
+    summary = client.discover(out)
+    search = summary["pages"]["search"]
+    assert search["stub"] is True and search["http_status"] == 200
+    assert "Servicepipe" in search["diagnosis"]
+    assert (out / "search_page.html").exists()
+    assert any("cookies" in h.lower() for h in summary["hints"])
+
+
+def test_search_refreshes_antiforgery_token_on_400(tmp_path):
+    page_with_token = read_fixture("edisclosure_search_page.html").replace(
+        '<input type="hidden" name="lastPageSize" value="10">',
+        '<input type="hidden" name="lastPageSize" value="10">\n  <input type="hidden" name="__RequestVerificationToken" value="TOKEN-{n}">')
+    state = {"n": 0}
+
+    def search_get(m, url, p, d):
+        state["n"] += 1
+        return 200, page_with_token.replace("{n}", str(state["n"]))
+
+    def search_post(m, url, p, d):
+        if d.get("__RequestVerificationToken") == "TOKEN-1":
+            return 400, "antiforgery token expired"
+        return 200, read_fixture("edisclosure_search_results.html")
+
+    rules = [
+        (lambda m, url, p, d: m == "GET" and url.endswith("/poisk-po-soobshheniyam"), search_get),
+        (lambda m, url, p, d: m == "POST" and url.endswith("/poisk-po-soobshheniyam"), search_post),
+    ]
+    client, session = _client(tmp_path, rules)
+    client.http.max_retries = 0
+    rows, _ = client.search_page(date(2024, 3, 14), date(2024, 3, 15))
+    assert len(rows) == 3
+    posts = [c for c in session.calls if c["method"] == "POST"]
+    assert [c["data"]["__RequestVerificationToken"] for c in posts] == ["TOKEN-1", "TOKEN-2"]
+    assert posts[0]["headers"]["RequestVerificationToken"] == "TOKEN-1"
+    assert posts[1]["headers"]["Referer"].endswith("/poisk-po-soobshheniyam")

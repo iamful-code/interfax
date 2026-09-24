@@ -113,23 +113,41 @@ disclosure-alpha backtest --hold-days 20 --split-date 2022-01-01   # страт�
 | `сообщений нет -- сначала выполните сбор` | Не выполнен шаг 7.2 или он ничего не нашёл — проверьте `discovery.json` и `config\edisclosure_form.json` |
 | В `events.parquet` мало строк | Компании не сопоставились с MOEX по ИНН: посмотрите `data\processed\companies.parquet` (ИНН должен быть заполнен) и `mapping.parquet` |
 
-## Cookies браузера (обход антибот-проверки)
-Если сайт открывается в браузере, но скрипту отвечает 503/403 с HTML-страницей, сайт проверяет браузер
-и выдаёт cookie после проверки. Передайте эти cookie скрипту:
+## Cookies браузера (обход проверки браузера)
 
-1. Откройте https://e-disclosure.ru/poisk-po-soobshheniyam в Chrome/Edge, дождитесь загрузки.
-2. Нажмите F12 → вкладка **Network** → обновите страницу (F5) → кликните первый запрос
-   (`poisk-po-soobshheniyam`) → справа **Headers** → раздел **Request Headers** → строка `Cookie:`.
-   Скопируйте её значение целиком (всё после `Cookie:`).
-3. Сохраните в файл `config\cookies.txt` одной строкой (например, `notepad config\cookies.txt`).
-   Подойдёт и файл в формате Netscape `cookies.txt` из расширения «Get cookies.txt LOCALLY».
-4. Там же в Request Headers скопируйте `User-Agent` и задайте его скрипту тем же, что у браузера
-   (защита часто привязывает cookie к User-Agent):
+Сайт закрыт защитой, которая сначала отдаёт страницу-заглушку со скриптом: скрипт проверяет браузер,
+выставляет cookies (`spjs`, `spsc`, `spid`) и только потом загружает настоящую страницу. Скрипту такую
+проверку не пройти, поэтому cookies нужно взять из браузера. `discover` теперь распознаёт заглушку и
+пишет `заглушка антибот-защиты (HTTP 200, но контента нет)`.
+
+1. Откройте https://e-disclosure.ru/poisk-po-soobshheniyam в Chrome или Edge и дождитесь,
+   пока вместо спиннера появится обычная страница с полями поиска.
+2. Нажмите F12, вкладка **Network**, обновите страницу (F5), кликните самый первый запрос
+   (`poisk-po-soobshheniyam`), справа откройте **Headers** → **Request Headers**.
+3. Создайте файл `config\cookies.txt` по образцу `config\cookies.example.txt` и впишите в него две строки:
+   * `User-Agent: ` и значение заголовка `user-agent` из браузера;
+   * значение заголовка `cookie` целиком, одной строкой.
    ```powershell
-   $env:DA_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+   copy config\cookies.example.txt config\cookies.txt
+   notepad config\cookies.txt
    ```
-5. Повторите `disclosure-alpha discover`. В выводе должно быть `cookies загружено: N` и `search: ok`.
+   Подойдёт и файл в формате Netscape из расширения «Get cookies.txt LOCALLY» — тогда строку `User-Agent:`
+   допишите в начало файла вручную.
+4. Повторите разведку:
+   ```powershell
+   disclosure-alpha discover
+   ```
+   В выводе должно появиться `cookies загружено: N (User-Agent взят из файла)` и `search: ok`.
 
-Cookie проверки живут ограниченное время (часы–дни); если 503 вернулся — повторите шаги 1–3.
+Файл `config\cookies.txt` в git не попадает (он в `.gitignore`), потому что содержит данные вашей сессии.
+Cookies проверки живут ограниченное время; когда вернётся заглушка, повторите шаги 1–3.
+Переносы строк внутри длинных значений скрипт убирает сам, так что вставка «как скопировалось» допустима.
+
 Если `discover` сообщает, что отвечает только хост с `www.`, задайте
 `$env:DA_EDISCLOSURE_BASE_URL = "https://www.e-disclosure.ru"`.
+
+## Чего не делать
+Не копируйте скачанные страницы сайта в репозиторий и не пересылайте их: в заглушке защиты лежит
+обфусцированный сторонний скрипт. Каталоги `data\discovery\` и `tests\fixtures\live\` добавлены
+в `.gitignore`. Если понадобится показать разметку, присылайте небольшой фрагмент нужного блока
+(например, HTML формы поиска), а не файл целиком.
