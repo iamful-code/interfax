@@ -1,0 +1,13 @@
+{
+  "_comment": "Скопируйте в config/edisclosure_form.json и поправьте имена полей по data/discovery/discovery.json",
+  "field_map": {
+    "date_from": "dateStart",
+    "date_till": "dateFinish",
+    "page": "lastPageNumber",
+    "page_size": "lastPageSize",
+    "event_types": "eventTypeCheckboxGroup",
+    "query": "query",
+    "query_id": "queryId",
+    "event_type_term": "eventTypeTerm"
+  }
+}

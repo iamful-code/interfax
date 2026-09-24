@@ -1,0 +1,20 @@
+# data & caches (large, regenerable)
+data/*
+!data/.gitkeep
+*.parquet
+*.sqlite
+.cache/
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+# outputs
+reports/*
+!reports/.gitkeep
+.ipynb_checkpoints/

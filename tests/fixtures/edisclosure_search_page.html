@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>Интерфакс – Сервер раскрытия информации</title>
+<script>
+  var searchUrl = "/poisk-po-soobshheniyam";
+  function load(){ $.post("/Event/Page?companyId=3043&year=2024", {}, function(){}); }
+</script>
+</head>
+<body>
+<header><a href="/">Главная</a> <a href="/portal/lastnews.aspx">Лента новостей</a></header>
+<form id="searchForm" action="/poisk-po-soobshheniyam" method="post">
+  <input type="hidden" name="lastPageSize" value="10">
+  <input type="hidden" name="lastPageNumber" value="1">
+  <input type="text" name="query" value="" placeholder="Название компании, ИНН, ОГРН">
+  <input type="hidden" name="queryId" value="">
+  <input type="hidden" name="region" value="">
+  <input type="text" name="eventTypeTerm" value="">
+  <input type="radio" name="radView" value="0" checked><label>по типам</label>
+  <input type="radio" name="radView" value="1"><label>по тексту</label>
+  <div class="eventTypes">
+    <input type="checkbox" id="et_1" name="eventTypeCheckboxGroup" value="1"><label for="et_1">Сведения о решениях общих собраний</label>
+    <input type="checkbox" id="et_12" name="eventTypeCheckboxGroup" value="12"><label for="et_12">О приобретении эмитентом собственных акций</label>
+    <input type="checkbox" id="et_52" name="eventTypeCheckboxGroup" value="52"><label for="et_52">Об изменении размера доли участия лиц, входящих в состав органов управления эмитента, в уставном капитале эмитента</label>
+    <input type="checkbox" id="et_53" name="eventTypeCheckboxGroup" value="53"><label for="et_53">О рекомендациях в отношении размеров дивидендов</label>
+    <input type="checkbox" id="et_77" name="eventTypeCheckboxGroup" value="77" checked><label for="et_77">Иные сообщения</label>
+    <input type="checkbox" id="et_90" name="eventTypeCheckboxGroup" value="90"><label for="et_90">Присвоение или изменение рейтинга</label>
+  </div>
+  <input type="text" name="dateStart" value="01.01.2024">
+  <input type="text" name="dateFinish" value="31.01.2024">
+  <select name="lastPageSizeSelect"><option value="10" selected>10</option><option value="50">50</option><option value="100">100</option></select>
+  <input type="submit" value="Найти">
+</form>
+<footer>© Интерфакс</footer>
+</body></html>
