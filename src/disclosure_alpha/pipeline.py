@@ -330,16 +330,43 @@ def run_backtest(settings: Settings, events: pd.DataFrame, prices: pd.DataFrame,
     result.trades.to_csv(out_dir / "trades.csv", index=False)
     result.daily.to_csv(out_dir / "equity.csv", index=False)
     png = plot_equity(result.daily, out_dir / "equity.png")
-    sections = [("Метрики стратегии", pd.DataFrame([result.metrics]).T.reset_index().rename(columns={"index": "metric", 0: "value"}))]
+    metrics_df = pd.DataFrame([{"metric": k, "value": v} for k, v in result.metrics.items()])
+    sections = [("Метрики стратегии", metrics_df)]
+
+    bt_logger = logging.getLogger("disclosure_alpha.analysis.backtest")
+    prev_level = bt_logger.level
     placebo = None
-    if placebo_iter:
-        placebo = random_event_benchmark(events, prices, index, cfg, n_iter=placebo_iter)
-        sections.append(("Плацебо (случайные даты)", pd.DataFrame([placebo]) if isinstance(placebo, dict) else placebo))
     wf = None
-    if split_date:
-        wf = walk_forward(events, prices, index, {"hold_days": [10, 20, 40, 60]}, split_date)
-        sections.append(("Walk-forward", pd.DataFrame([{"in_sample": str(wf.get("in_sample")), "out_of_sample": str(wf.get("out_of_sample")),
-                                                        "best_params": str(wf.get("best_params"))}])))
+    try:
+        bt_logger.setLevel(logging.WARNING)  # не засорять лог сотнями прогонов плацебо / сетки
+        if placebo_iter:
+            placebo = random_event_benchmark(events, prices, index, cfg, n_iter=placebo_iter)
+            sections.append(("Плацебо: та же стратегия на случайных датах", _placebo_table(placebo)))
+        if split_date:
+            wf = walk_forward(events, prices, index, {"hold_days": [10, 20, 40, 60]}, split_date)
+            sections.append((f"Walk-forward (разбиение {split_date}, лучший набор {wf.get('best_params')})", _walk_forward_table(wf)))
+    finally:
+        bt_logger.setLevel(prev_level)
     md = out_dir / "backtest.md"
     write_markdown_report(md, sections)
     return {"result": result, "placebo": placebo, "walk_forward": wf, "report": md, "plot": png}
+
+
+_KEY_METRICS = ("total_return", "cagr", "sharpe", "max_drawdown", "hit_rate", "n_trades", "alpha_annual", "alpha_t", "beta")
+
+
+def _placebo_table(placebo: dict) -> pd.DataFrame:
+    dist = placebo.get("placebo")
+    rows = []
+    for k, real_v in (placebo.get("real") or {}).items():
+        vals = dist[k].dropna() if isinstance(dist, pd.DataFrame) and k in dist else pd.Series(dtype=float)
+        rows.append({"metric": k, "real": real_v, "placebo_mean": vals.mean() if len(vals) else np.nan,
+                     "placebo_p5": vals.quantile(0.05) if len(vals) else np.nan,
+                     "placebo_p95": vals.quantile(0.95) if len(vals) else np.nan,
+                     "percentile_of_real": (placebo.get("percentile") or {}).get(k), "n_iter": placebo.get("n_iter")})
+    return pd.DataFrame(rows)
+
+
+def _walk_forward_table(wf: dict) -> pd.DataFrame:
+    is_m, oos_m = wf.get("in_sample") or {}, wf.get("out_of_sample") or {}
+    return pd.DataFrame([{"metric": k, "in_sample": is_m.get(k), "out_of_sample": oos_m.get(k)} for k in _KEY_METRICS])
