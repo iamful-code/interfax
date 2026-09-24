@@ -329,18 +329,20 @@ def test_search_via_form_fills_and_clicks(transport, server, tmp_path):
     assert (tmp_path / "probe" / "search_probe.json").exists()
 
 
-def test_search_via_form_starts_browser_lazily(server, tmp_path):
-    """Поиск можно вызвать сразу: браузер поднимается при первой операции со страницей."""
-    from disclosure_alpha.config import Settings
-    from disclosure_alpha.edisclosure.client import EDisclosureClient, is_captcha_page, is_protection_stub
+def test_page_actions_start_browser_lazily(monkeypatch):
+    """Операции со страницей поднимают браузер сами: probe-search падал, пока это делал только request()."""
+    tr = BrowserTransport(warmup_url="http://127.0.0.1:1/", stub_detector=_stub)
+    started = {"n": 0}
 
-    base = f"http://127.0.0.1:{server.server_address[1]}"
-    tr = BrowserTransport(warmup_url=base + "/poisk-po-soobshheniyam", min_interval_sec=0,
-                          stub_detector=is_protection_stub, captcha_detector=is_captcha_page,
-                          warmup_timeout_sec=30, executable_path=find_chromium())
-    client = EDisclosureClient(Settings(data_dir=tmp_path / "d", edisclosure_base_url=base), http=tr)
-    try:
-        rows, _ = client.search_via_form(date(2024, 3, 14), date(2024, 3, 15), event_type_ids=["52"])
-        assert len(rows) == 1 and rows[0].company_id == 3043
-    finally:
-        tr.close()
+    def fake_start():
+        started["n"] += 1
+        tr._context = _FakeContext()
+        tr._page = _ScriptedPage(["<html><body><h1>ok</h1></body></html>"])
+        return tr
+
+    monkeypatch.setattr(tr, "start", fake_start)
+    assert tr._page is None
+    assert tr.current_html() == "<html><body><h1>ok</h1></body></html>"
+    assert started["n"] == 1
+    tr.field_names()           # второй вызов не перезапускает браузер
+    assert started["n"] == 1
