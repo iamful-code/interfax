@@ -612,6 +612,19 @@ class BrowserTransport:
             out.append(r)
         return out
 
+    def script_urls(self, same_origin_only: bool = True) -> list[str]:
+        """Адреса подключённых скриптов страницы (по умолчанию только свои, без сторонних)."""
+        self._ensure_started()
+        try:
+            urls = list(self._page.evaluate(
+                "() => Array.from(document.querySelectorAll('script[src]')).map(s => s.src)"))
+        except Exception:  # noqa: BLE001
+            return []
+        if not same_origin_only:
+            return urls
+        origin = "/".join((self._page.url or "").split("/", 3)[:3])
+        return [u for u in urls if u.startswith(origin)]
+
     def list_clickables(self, limit: int = 60) -> list[dict]:
         """Кнопки и ссылки-кнопки на странице -- для диагностики, когда нужный элемент не найден."""
         self._ensure_started()

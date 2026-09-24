@@ -287,10 +287,13 @@ class EDisclosureClient:
         return summary
 
     # ------------------------------------------------------------------ поиск через саму форму (браузер)
-    SEARCH_BUTTON_SELECTORS = ("#sEventSearchForm__button-search", ".sEventSearchForm__button-search",
-                               "[id*='button-search']", "[class*='button-search']",
+    # порядок важен: sEventSearchForm -- это форма выбора типов сообщений, а не общий поиск
+    SEARCH_BUTTON_SELECTORS = ("#period__button-search", "[id^='period'][id*='search']",
+                               "[id*='button-search']:not([id*='sEventSearchForm'])",
+                               "[class*='button-search']:not([class*='sEventSearchForm'])",
                                "form button[type=submit]", "form input[type=submit]",
-                               "button[type=submit]", "input[type=submit]")
+                               "button[type=submit]", "input[type=submit]",
+                               "#sEventSearchForm__button-search")
     CONFIRM_BUTTON_SELECTORS = ("#sEventSearchForm__button-confirm", ".sEventSearchForm__button-confirm")
     # ждать нужно именно ссылки на сообщения: таблицы на странице есть и до поиска (дерево типов, календарь)
     RESULTS_SELECTORS = ("a[href*='EventId']", "a[href*='/event/']", "a[href*='soobshhenie']",
@@ -321,7 +324,9 @@ class EDisclosureClient:
         closed = tr.dismiss_overlays()
         if closed:
             log.info("закрыты перекрывающие баннеры: %s", closed)
-        clicked = tr.click_first(list(self.SEARCH_BUTTON_SELECTORS))
+        clicked, rows, html = self._click_search_and_wait(tr, wait_selector)
+        if clicked and rows:
+            return rows, html
         if not clicked:
             clickables = tr.list_clickables()
             self._save_diagnostic("search_button_not_found.json", {"selectors_tried": list(self.SEARCH_BUTTON_SELECTORS),
@@ -330,10 +335,48 @@ class EDisclosureClient:
             raise HttpError(self.url(SEARCH_PATH), 0,
                             "не найдена кнопка поиска. Видимые кнопки на странице: "
                             + "; ".join(f"{c['tag']}#{c['id']}.{c['cls']} {c['text']!r}" for c in visible[:10]))
-        log.info("нажата кнопка поиска: %s", clicked)
-        tr.wait_for_selector(wait_selector or ", ".join(self.RESULTS_SELECTORS), timeout_ms=20_000)
-        html = tr.current_html()
-        return parsers.parse_search_results(html, self.base_url), html
+        log.info("нажата кнопка поиска: %s (результатов не разобрано)", clicked)
+        return rows, html
+
+    def _click_search_and_wait(self, tr, wait_selector: Optional[str]) -> tuple[Optional[str], list[MessageRow], str]:
+        """Пробует кнопки-кандидаты, пока не появятся сообщения. Возвращает (селектор, строки, HTML)."""
+        selector_used, best_rows, best_html = None, [], ""
+        for sel in self.SEARCH_BUTTON_SELECTORS:
+            if not tr.count(sel):
+                continue
+            if not tr.click(sel, timeout_ms=4000):
+                continue
+            selector_used = selector_used or sel
+            tr.wait_for_selector(wait_selector or ", ".join(self.RESULTS_SELECTORS), timeout_ms=15_000)
+            html = tr.current_html()
+            rows = parsers.parse_search_results(html, self.base_url)
+            log.info("кнопка %s: разобрано сообщений %d", sel, len(rows))
+            if rows:
+                return sel, rows, html
+            if len(html) > len(best_html):
+                best_html, selector_used = html, sel
+        return selector_used, best_rows, best_html
+
+    API_PATH_RE = re.compile(r"""["'`](/api/[A-Za-z0-9_\-./{}$?=&]{2,100})["'`]""")
+
+    def discover_api_endpoints(self, max_scripts: int = 30) -> dict:
+        """Ищет адреса внутреннего интерфейса данных (/api/...) в собственных скриптах сайта."""
+        if not self.is_browser:
+            return {}
+        found: dict[str, int] = {}
+        scripts = self.http.script_urls()
+        checked = []
+        for url in scripts[:max_scripts]:
+            try:
+                text = self.http.get(url, prefer_fetch=True).text
+            except Exception as e:  # noqa: BLE001
+                log.debug("скрипт %s: %s", url, e)
+                continue
+            checked.append(url)
+            for m in self.API_PATH_RE.finditer(text):
+                path = m.group(1)
+                found[path] = found.get(path, 0) + 1
+        return {"scripts_checked": checked, "api_paths": sorted(found.items(), key=lambda kv: -kv[1])}
 
     def _save_diagnostic(self, name: str, data: dict) -> Path:
         out = Path(self.settings.discovery_dir)
@@ -357,7 +400,7 @@ class EDisclosureClient:
                    "sample": [r.to_dict() for r in rows[:5]], "dom": parsers.describe_dom(html),
                    "field_names": self.http.field_names(), "clickables": self.http.list_clickables(30),
                    "page_url": getattr(self.http, "_page", None) and self.http._page.url,
-                   "requests": requests_log}
+                   "requests": requests_log, "api": self.discover_api_endpoints()}
         (out_dir / "search_probe.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), "utf-8")
         return summary
 

@@ -120,6 +120,11 @@ def cmd_probe_search(args):
         print("страница не отправила ни одного запроса после нажатия (результат уже был на странице?)")
     for row in summary["sample"]:
         print(f"  пример строки: {row}")
+    api = summary.get("api") or {}
+    if api.get("api_paths"):
+        print(f"адреса интерфейса данных, найденные в скриптах сайта (проверено скриптов: {len(api.get('scripts_checked', []))}):")
+        for path, n in api["api_paths"][:20]:
+            print(f"  {path}  (встречается {n})")
     print(f"подробности: {(Path(args.out) if args.out else settings.discovery_dir) / 'search_probe.json'}")
 
 

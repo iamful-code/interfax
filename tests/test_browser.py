@@ -55,7 +55,9 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(r"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Поиск</title></head><body>
 <form id="f"><input type="text" name="dateStart" readonly><input type="text" name="dateFinish" readonly>
 <input type="checkbox" name="eventTypeCheckboxGroup" value="52"><input type="checkbox" name="eventTypeCheckboxGroup" value="12">
-<button type="button" id="sEventSearchForm__button-search">Найти</button></form>
+<button type="button" id="sEventSearchForm__button-search">Фильтр типов</button>
+<button type="button" id="period__button-search">Найти</button></form>
+<script src="/src/js/app.js"></script>
 <div id="cookieBanner" style="position:fixed;left:0;top:0;width:100%;height:100%;z-index:99">
   <button id="AcceptCookieBtn">Принять</button></div>
 <div id="results"></div>
@@ -63,6 +65,8 @@ class _Handler(BaseHTTPRequestHandler):
   document.getElementById('cookieBanner').remove(); });</script>
 <script>
 document.getElementById('sEventSearchForm__button-search').addEventListener('click', function(){
+  return; });
+document.getElementById('period__button-search').addEventListener('click', function(){
   const types = Array.from(document.querySelectorAll('input[name=eventTypeCheckboxGroup]:checked')).map(b => b.value);
   const from = document.querySelector('input[name=dateStart]').value.replace(/\./g, '');
   const till = document.querySelector('input[name=dateFinish]').value.replace(/\./g, '');
@@ -73,6 +77,15 @@ document.getElementById('sEventSearchForm__button-search').addEventListener('cli
   }, 300);
 });
 </script></body></html>""")
+        if urlparse(self.path).path == "/src/js/app.js":
+            body = 'fetch("/api/data/sevents?page=1"); var t = "/api/data/sevent-types"; var c = "/api/company/card";'
+            data = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if urlparse(self.path).path == "/spa":
             return self._send("""<!DOCTYPE html><html><head><meta charset="utf-8"><title>SPA</title></head>
 <body><div id="app"></div><script>setTimeout(function(){
@@ -426,3 +439,29 @@ def test_records_requests_made_by_the_page(transport, server, tmp_path):
     assert any("/poisk-po-soobshheniyam" in u for u in urls)          # переход на страницу поиска записан
     assert all(r["resource_type"] in ("xhr", "fetch", "document") for r in summary["requests"])
     assert summary["page_url"].startswith(base)
+
+
+def test_tries_buttons_until_results_appear(transport, server, tmp_path):
+    """Первая подходящая кнопка -- фильтр типов сообщений; поиск запускает другая."""
+    from disclosure_alpha.config import Settings
+    from disclosure_alpha.edisclosure.client import EDisclosureClient
+
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    client = EDisclosureClient(Settings(data_dir=tmp_path / "data", edisclosure_base_url=base), http=transport)
+    rows, _ = client.search_via_form(date(2024, 3, 14), date(2024, 3, 15))
+    assert len(rows) == 1 and rows[0].company_id == 3043
+
+
+def test_discovers_api_paths_from_site_scripts(transport, server, tmp_path):
+    """Адреса внутреннего интерфейса данных берутся из собственных скриптов сайта."""
+    from disclosure_alpha.config import Settings
+    from disclosure_alpha.edisclosure.client import EDisclosureClient
+
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    client = EDisclosureClient(Settings(data_dir=tmp_path / "data", edisclosure_base_url=base), http=transport)
+    transport.open_page(base + "/poisk-po-soobshheniyam")
+    api = client.discover_api_endpoints()
+    paths = dict(api["api_paths"])
+    assert "/api/data/sevents?page=1" in paths or "/api/data/sevents" in "".join(paths)
+    assert "/api/data/sevent-types" in paths
+    assert api["scripts_checked"]
