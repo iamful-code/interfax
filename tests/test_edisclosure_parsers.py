@@ -92,3 +92,43 @@ def test_parse_datetime_ru_variants():
     assert parsers.parse_datetime_ru("x 15.03.2024 18:52:07 y") == datetime(2024, 3, 15, 18, 52, 7)
     assert parsers.parse_datetime_ru("нет даты") is None
     assert parsers.parse_datetime_ru("31.02.2024") is None
+
+
+def test_parse_search_json_real_shape():
+    """Ответ поиска сайта: список foundEventsList с полями компании, типа и даты."""
+    from disclosure_alpha.edisclosure.parsers import parse_search_json, total_from_payload
+
+    payload = {"foundEventsList": [
+        {"highlighted": "<b>Изменение</b> размера доли участия", "agency": "ИА АК&М", "companyID": 31793,
+         "companyName": 'АО "Радуга"', "eventName": "Изменение размера доли участия члена органа управления",
+         "pseudoGUID": "OW2stjkYJ0Cbt5c5XS3ANw-B-B", "eventDate": "2026-03-14T18:52:00"}], "totalCount": 1}
+    rows = parse_search_json(payload)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.event_id == "OW2stjkYJ0Cbt5c5XS3ANw-B-B"
+    assert r.company_id == 31793 and r.company_name == 'АО "Радуга"'
+    assert r.published_at == datetime(2026, 3, 14, 18, 52)
+    assert r.event_type.startswith("Изменение размера доли")
+    assert r.url.endswith("EventId=OW2stjkYJ0Cbt5c5XS3ANw-B-B")
+    assert total_from_payload(payload) == 1
+
+
+def test_parse_search_json_tolerates_other_names():
+    """Имена полей могут отличаться: ищем по смыслу, дату -- в любом поле."""
+    from disclosure_alpha.edisclosure.parsers import parse_search_json
+
+    rows = parse_search_json({"items": [
+        {"guid": "ABCdef1234567890xyz", "company_id": "77", "orgName": "ПАО Икс",
+         "title": "О созыве общего собрания", "someDate": "24.09.2026 10:15"}]})
+    assert len(rows) == 1
+    assert rows[0].event_id == "ABCdef1234567890xyz" and rows[0].company_id == 77
+    assert rows[0].published_at == datetime(2026, 9, 24, 10, 15)
+    assert rows[0].company_name == "ПАО Икс"
+
+
+def test_parse_search_json_ignores_unusable_rows():
+    from disclosure_alpha.edisclosure.parsers import find_event_list, parse_search_json
+
+    assert parse_search_json({"foundEventsList": [{"companyName": "без идентификатора"}]}) == []
+    assert parse_search_json({}) == []
+    assert find_event_list([{"a": 1}]) == [{"a": 1}]

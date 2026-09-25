@@ -130,6 +130,24 @@ def cmd_probe_search(args):
     print(f"подробности: {(Path(args.out) if args.out else settings.discovery_dir) / 'search_probe.json'}")
 
 
+def cmd_counts(args):
+    """Сколько сообщений по годам: сразу видно, за какие периоды есть данные."""
+    settings = load_settings()
+    args.browser = True
+    client = _ed_client(args, settings)
+    try:
+        rows = client.counts_by_year(_categories(args.categories), args.year_from, args.year_till)
+    finally:
+        client.close()
+    print(f"{'год':<6}{'сообщений':>12}")
+    total = 0
+    for r in rows:
+        print(f"{r['year']:<6}{r['count']:>12}")
+        if r["count"] > 0:
+            total += r["count"]
+    print(f"{'итого':<6}{total:>12}")
+
+
 def cmd_probe_types(args):
     """Сверяет идентификаторы типов сообщений и проверяет, какие из них понимает поиск сайта."""
     settings = load_settings()
@@ -284,6 +302,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--event-types", help="идентификаторы типов сообщений через запятую (из discovery.json)")
     s.add_argument("--out")
     s.set_defaults(func=cmd_probe_search)
+
+    s = add_browser_flag(sub.add_parser("counts", help="число сообщений по годам (для выбранных категорий)"))
+    s.add_argument("--categories", help="через запятую; без них -- все сообщения")
+    s.add_argument("--from", dest="year_from", type=int, default=2012, help="начальный год")
+    s.add_argument("--till", dest="year_till", type=int, default=2026, help="конечный год")
+    s.set_defaults(func=cmd_counts)
 
     s = add_browser_flag(sub.add_parser("probe-types", help="сверить идентификаторы типов сообщений с поиском сайта"))
     s.add_argument("--category", default="insider_stake_change", help="категория из config/event_types.yaml")

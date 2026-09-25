@@ -442,15 +442,60 @@ class EDisclosureClient:
         head = text[:300].replace("\n", " ").strip()
         if '"errors"' in text[:400] or res.status >= 400:
             raise HttpError(self.url(API_SEARCH_PATH), res.status, f"поиск отклонён: {head}", body=text)
-        rows = parsers.parse_search_results(text, self.base_url)
+        rows: list[MessageRow] = []
+        if text.lstrip().startswith(("{", "[")):          # поиск отвечает данными JSON, а не разметкой
+            try:
+                rows = parsers.parse_search_json(json.loads(text), self.base_url)
+            except ValueError as e:
+                log.warning("не удалось разобрать ответ поиска: %s", e)
         if not rows:
-            rows = parsers.parse_message_list(text, self.base_url)
+            rows = parsers.parse_search_results(text, self.base_url) or parsers.parse_message_list(text, self.base_url)
         if not rows:
             log.info("прямой поиск: 0 строк, ответ %d байт: %s", len(text), head)
             self._save_diagnostic("search_api_empty.json",
                                   {"payload": payload, "status": res.status, "length": len(text),
                                    "response_head": text[:4000]})
         return rows, text
+
+    def count_messages(self, date_from: date, date_till: date,
+                       event_type_ids: Optional[Iterable[str]] = None) -> int:
+        """Сколько сообщений находит поиск за период (берём общее число из ответа, без обхода страниц)."""
+        rows, text = self.search_api(date_from, date_till, event_type_ids, page=1, page_size=100, use_cache=True)
+        if text.lstrip().startswith(("{", "[")):
+            try:
+                total = parsers.total_from_payload(json.loads(text))
+                if total is not None:
+                    return total
+            except ValueError:
+                pass
+        return len(rows)
+
+    def counts_by_year(self, categories: Optional[Iterable[str]], year_from: int, year_till: int) -> list[dict]:
+        """Число сообщений по годам -- чтобы понять, за какие периоды данные вообще есть."""
+        from .taxonomy import default_taxonomy
+
+        tx = default_taxonomy()
+        type_ids = None
+        matched: list[tuple[str, str]] = []
+        if categories:
+            wanted = set(categories)
+            matched = [(str(t["id"]), t.get("name", "")) for t in self.fetch_event_types()
+                       if tx.classify_name(t.get("name", "")) in wanted]
+            type_ids = [i for i, _ in matched]
+            log.info("типов сообщений в категориях %s: %d", list(wanted), len(type_ids))
+        out = []
+        for year in range(year_from, year_till + 1):
+            till = date(year, 12, 31)
+            if till > date.today():
+                till = date.today()
+            try:
+                n = self.count_messages(date(year, 1, 1), till, type_ids)
+            except HttpError as e:
+                log.warning("год %d: %s", year, e)
+                n = -1
+            out.append({"year": year, "count": n})
+            log.info("год %d: %s сообщений", year, n)
+        return out
 
     def probe_event_types(self, category: str, date_from: date, date_till: date,
                           out_dir: Optional[Path] = None) -> dict:

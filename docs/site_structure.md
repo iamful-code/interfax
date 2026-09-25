@@ -61,10 +61,21 @@ URL-подобные строки из скриптов (ajax-эндпоинты
 |---|---|
 | Страница поиска | `/poisk-po-soobshheniyam`, форма `#sEventSearchForm`, кнопка «Искать» `#sendButton`, результаты вставляются в `#searchResults` |
 | Поля формы | `dateStart`, `dateFinish` (ДД.ММ.ГГГГ), `lastPageNumber`, `lastPageSize`, `eventTypeCheckboxGroup` (повторяется), `districtsCheckboxGroup`, `regionsCheckboxGroup`, `branchesCheckboxGroup`, `textfieldCompany` (ИНН/ОГРН/ОКПО), `textfieldEvent`, `query`, `queryEvent`, `radView`, `radReg`, `__RequestVerificationToken` |
-| Поиск (то же, что делает страница) | `POST /api/search/sevents`, тело -- форма (`application/x-www-form-urlencoded`), обязательны заголовок `RequestVerificationToken` и `X-Requested-With: XMLHttpRequest`; без них ответ `{"errors":["E001"]}`. Ответ -- кусок разметки с таблицей результатов |
+| Поиск (то же, что делает страница) | `POST /api/search/sevents`, тело -- форма (`application/x-www-form-urlencoded`), обязательны заголовок `RequestVerificationToken` и `X-Requested-With: XMLHttpRequest`; без них ответ `{"errors":["E001"]}`. **Ответ -- JSON**: `{"foundEventsList":[{"companyID":..,"companyName":..,"eventName":..,"pseudoGUID":..,"agency":..,"highlighted":..}], "totalCount":N}`; идентификатор сообщения (`pseudoGUID`) подставляется в `/portal/event.aspx?EventId=...` |
 | Справочник типов сообщений | `GET /api/data/sevent-types` -> `[{"id":136,"name":"..."}]`, около 300 типов |
 | Вход в личный кабинет | `POST /api/account/login` (нам не нужен) |
 | Адреса сообщений и компаний | прежние: `/portal/event.aspx?EventId=...&q=`, `/portal/company.aspx?id=...` |
 | Размер страницы | по умолчанию 10; `lastPageSize=100` работает |
 
 Значения фильтров «все» кодируются как `-1` (округа, регионы, отрасли), `radReg=FederalDistricts`, `radView=0`.
+
+## Сколько данных есть (проверено 25.09.2026)
+Фильтр по типам работает: идентификаторы берутся из справочника сайта и передаются повторяющимся
+полем `eventTypeCheckboxGroup`. Но сообщений категории «изменение доли участия члена органа управления»
+за 2026 год найдено **одно** (АО «Радуга», 16.06.2026, раскрыто через ИА АК&М).
+
+Причина, скорее всего, в послаблениях раскрытия с 2022 года: эмитентам разрешили ограничивать
+публикацию чувствительных сведений, и этот тип сообщений практически исчез. Значит гипотезу о сделках
+инсайдеров нужно проверять на архиве 2012-2021 годов, а не на свежих данных. Команда
+`disclosure-alpha counts --categories insider_stake_change --from 2012 --till 2026` показывает
+распределение по годам (число берётся из поля `totalCount`, без обхода страниц).

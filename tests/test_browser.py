@@ -1,6 +1,7 @@
 """Проверка браузерного транспорта на локальном сервере, имитирующем JS-проверку сайта."""
 from __future__ import annotations
 
+import json
 import threading
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -124,13 +125,15 @@ document.getElementById('sendButton').addEventListener('click', function(){
             types = "_".join(f.get("eventTypeCheckboxGroup", []))
             page = (f.get("lastPageNumber") or ["1"])[0]
             size = int((f.get("lastPageSize") or ["10"])[0])
-            rows = "".join(
-                f'<div class="table__row"><div class="table__cell">24.09.2026 19:5{i % 10}</div>'
-                f'<div class="table__cell"><a href="/portal/company.aspx?id={500 + i}">ПАО Тест {i}</a></div>'
-                f'<div class="table__cell"><a href="/portal/event.aspx?EventId=E{page}-{i}-{types}&q=">'
-                f'Решения совета директоров</a></div></div>'
-                for i in range(min(size, 3 if page != "1" else size)))
-            return self._send(f'<div class="table">{rows}</div>')
+            n = min(size, 3 if page != "1" else size)
+            events = [{
+                "highlighted": "Решения совета директоров", "agency": "ИНТЕРФАКС",
+                "companyID": 500 + i, "companyName": f"ПАО Тест {i}",
+                "eventName": "Решения совета директоров",
+                "pseudoGUID": f"E{page}-{i}-{types}",
+                "eventDate": f"2026-09-24T19:5{i % 10}:00",
+            } for i in range(n)]
+            return self._send_json(json.dumps({"foundEventsList": events, "totalCount": 103}, ensure_ascii=False))
         fields = parse_qs(body, keep_blank_values=True)
         summary = ";".join(f"{k}={'|'.join(v)}" for k, v in sorted(fields.items()))
         self._send(RESULTS.format(payload=summary))
@@ -528,7 +531,9 @@ def test_search_api_sends_form_payload_with_token(transport, server, tmp_path):
     assert rows[0].company_id == 500
     assert rows[0].published_at == datetime(2026, 9, 24, 19, 50)
     assert rows[0].event_id.endswith("52_12")    # оба типа дошли отдельными полями
-    assert "table__row" in html
+    assert rows[0].url.endswith(rows[0].event_id)
+    assert rows[0].event_type == "Решения совета директоров"
+    assert "foundEventsList" in html             # поиск отвечает данными, а не разметкой
 
 
 def test_search_api_without_token_is_rejected(transport, server, tmp_path, monkeypatch):
@@ -586,3 +591,11 @@ def test_api_error_response_raises_and_switches_to_form(transport, server, tmp_p
 
     rows = list(client.iter_search(date(2024, 3, 14), date(2024, 3, 15), chunk_days=2, page_size=100, use_cache=False))
     assert len(rows) == 1 and client._force_form_search is True
+
+
+def test_counts_by_year_uses_total_from_response(transport, server, tmp_path):
+    """Число сообщений берётся из ответа поиска, без обхода всех страниц."""
+    client = _api_client(transport, server, tmp_path)
+    rows = client.counts_by_year(None, 2025, 2026)
+    assert [r["year"] for r in rows] == [2025, 2026]
+    assert all(r["count"] == 103 for r in rows)     # totalCount из ответа сервера

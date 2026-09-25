@@ -487,3 +487,108 @@ def describe_dom(html: str, max_items: int = 40) -> dict:
         "script_endpoints": find_script_endpoints(html)[:max_items],
         "has_date_placeholder": bool(re.search(r"дата|date|дд\.мм", html, re.I)),
     }
+
+
+# ----------------------------------------------------------------------------- ответ поиска в формате JSON
+# Поиск сайта (api/search/sevents) отвечает JSON вида
+# {"foundEventsList": [{"companyID":.., "companyName":.., "eventName":.., "pseudoGUID":.., ...}], ...}
+# Имена полей могут меняться, поэтому ищем по смыслу, а не по точному имени.
+_JSON_LIST_KEYS = ("foundEventsList", "events", "items", "data", "list", "rows", "result", "results")
+_ID_KEYS = ("pseudoguid", "pseudoguid", "eventguid", "eventid", "guid", "id", "code")
+_COMPANY_ID_KEYS = ("companyid", "company_id", "companycode", "orgid")
+_COMPANY_NAME_KEYS = ("companyname", "company", "orgname", "shortname")
+_EVENT_NAME_KEYS = ("eventname", "eventtype", "name", "title", "highlighted")
+_DATE_KEYS = ("eventdate", "publishdate", "publicationdate", "date", "datetime", "time", "created", "dt")
+_ISO_DT_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?")
+_LONG_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{16,}$")
+
+
+def find_event_list(payload) -> list[dict]:
+    """Список сообщений внутри ответа поиска (ключ может называться по-разному)."""
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in _JSON_LIST_KEYS:
+        value = payload.get(key)
+        if isinstance(value, list) and value and isinstance(value[0], dict):
+            return value
+    for value in payload.values():                      # запасной вариант: первый список словарей
+        if isinstance(value, list) and value and isinstance(value[0], dict):
+            return value
+    return []
+
+
+def _pick(item: dict, keys: tuple, lowered: dict) -> Optional[object]:
+    for k in keys:
+        if k in lowered and lowered[k] not in (None, ""):
+            return lowered[k]
+    return None
+
+
+def _parse_any_datetime(value) -> Optional[datetime]:
+    if not isinstance(value, str):
+        return None
+    m = _ISO_DT_RE.search(value)
+    if m:
+        y, mo, d, h, mi, sec = m.groups()
+        try:
+            return datetime(int(y), int(mo), int(d), int(h), int(mi), int(sec or 0))
+        except ValueError:
+            return None
+    return parse_datetime_ru(value)
+
+
+def _json_event_id(item: dict, lowered: dict) -> Optional[str]:
+    value = _pick(item, _ID_KEYS, lowered)
+    if isinstance(value, (str, int)) and str(value).strip():
+        return str(value).strip()
+    for v in item.values():                             # запасной вариант: длинный идентификатор в любом поле
+        if isinstance(v, str) and _LONG_ID_RE.match(v):
+            return v
+    return None
+
+
+def parse_search_json(payload, base_url: str = "https://e-disclosure.ru") -> list[MessageRow]:
+    """Строки сообщений из ответа поиска в формате JSON."""
+    rows: list[MessageRow] = []
+    for item in find_event_list(payload):
+        lowered = {str(k).lower(): v for k, v in item.items()}
+        event_id = _json_event_id(item, lowered)
+        if not event_id:
+            continue
+        company_id = _pick(item, _COMPANY_ID_KEYS, lowered)
+        try:
+            company_id = int(company_id) if company_id is not None else None
+        except (TypeError, ValueError):
+            company_id = None
+        published = None
+        for key in _DATE_KEYS:
+            published = _parse_any_datetime(lowered.get(key))
+            if published:
+                break
+        if published is None:                            # дата может лежать в поле с другим именем
+            for v in item.values():
+                published = _parse_any_datetime(v)
+                if published:
+                    break
+        event_type = _pick(item, _EVENT_NAME_KEYS, lowered) or ""
+        event_type = clean_text(soup_of(str(event_type)).get_text(" ")) if "<" in str(event_type) else clean_text(str(event_type))
+        company_name = clean_text(str(_pick(item, _COMPANY_NAME_KEYS, lowered) or ""))
+        url = urljoin(base_url, f"/portal/event.aspx?EventId={event_id}")
+        rows.append(MessageRow(event_id=event_id, company_id=company_id, company_name=company_name,
+                               published_at=published, event_type=event_type, url=url))
+    return rows
+
+
+def total_from_payload(payload) -> Optional[int]:
+    """Общее число найденных сообщений, если сервер его сообщает."""
+    if not isinstance(payload, dict):
+        return None
+    for key in ("totalCount", "total", "count", "found", "recordsTotal", "eventsCount"):
+        value = payload.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
