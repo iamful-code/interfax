@@ -532,11 +532,14 @@ def test_search_api_sends_form_payload_with_token(transport, server, tmp_path):
 
 
 def test_search_api_without_token_is_rejected(transport, server, tmp_path, monkeypatch):
-    """Сайт отвергает запрос без токена формы -- значит мы обязаны его отправлять."""
+    """Сайт отвергает запрос без токена формы; ошибка распознаётся, а не выглядит пустой выдачей."""
+    from disclosure_alpha.http import HttpError
+
     client = _api_client(transport, server, tmp_path)
     monkeypatch.setattr(transport, "input_value", lambda name: None)
-    rows, html = client.search_api(date(2026, 9, 22), date(2026, 9, 24), use_cache=False)
-    assert rows == [] and "E001" in html
+    with pytest.raises(HttpError) as e:
+        client.search_api(date(2026, 9, 22), date(2026, 9, 24), use_cache=False)
+    assert "E001" in str(e.value)
 
 
 def test_iter_search_uses_api_and_paginates(transport, server, tmp_path):
@@ -561,3 +564,25 @@ def test_fetch_event_types_and_category_mapping(transport, server, tmp_path):
     ids = resolve_event_type_ids(client, default_taxonomy(), ["insider_stake_change"])
     assert ids == ["52"]
     assert resolve_event_type_ids(client, default_taxonomy(), ["buyback"]) == ["12"]
+
+
+def test_falls_back_to_form_when_api_returns_nothing(transport, server, tmp_path, monkeypatch):
+    """Если прямой запрос пуст, а форма находит сообщения -- дальше работаем формой."""
+    client = _api_client(transport, server, tmp_path)
+    monkeypatch.setattr(client, "search_api", lambda *a, **kw: ([], ""))
+    rows = list(client.iter_search(date(2024, 3, 14), date(2024, 3, 15), chunk_days=2, page_size=100, use_cache=False))
+    assert len(rows) == 1 and client._force_form_search is True
+
+
+def test_api_error_response_raises_and_switches_to_form(transport, server, tmp_path, monkeypatch):
+    """Ответ с ошибкой распознаётся, а не считается пустой выдачей."""
+    from disclosure_alpha.http import HttpError
+
+    client = _api_client(transport, server, tmp_path)
+    monkeypatch.setattr(transport, "input_value", lambda name: None)      # без токена сайт вернёт ошибку
+    with pytest.raises(HttpError) as e:
+        client.search_api(date(2026, 9, 22), date(2026, 9, 24), use_cache=False)
+    assert "E001" in str(e.value)
+
+    rows = list(client.iter_search(date(2024, 3, 14), date(2024, 3, 15), chunk_days=2, page_size=100, use_cache=False))
+    assert len(rows) == 1 and client._force_form_search is True

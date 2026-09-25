@@ -93,6 +93,8 @@ class EDisclosureClient:
             self.field_map.update(field_map)
         self._form: Optional[parsers.FormSpec] = None
         self._search_html: Optional[str] = None
+        self._force_form_search = False      # прямой запрос не сработал -- работаем отправкой формы
+        self._api_checked = False            # прямой запрос уже сверяли с формой
 
     # ------------------------------------------------------------------ helpers
     def close(self) -> None:
@@ -436,10 +438,19 @@ class EDisclosureClient:
             headers["RequestVerificationToken"] = token
         res = tr.request("POST", self.url(API_SEARCH_PATH), data=payload, headers=headers,
                          use_cache=use_cache, prefer_fetch=True)
-        rows = parsers.parse_search_results(res.text, self.base_url)
+        text = res.text
+        head = text[:300].replace("\n", " ").strip()
+        if '"errors"' in text[:400] or res.status >= 400:
+            raise HttpError(self.url(API_SEARCH_PATH), res.status, f"поиск отклонён: {head}", body=text)
+        rows = parsers.parse_search_results(text, self.base_url)
         if not rows:
-            rows = parsers.parse_message_list(res.text, self.base_url)
-        return rows, res.text
+            rows = parsers.parse_message_list(text, self.base_url)
+        if not rows:
+            log.info("прямой поиск: 0 строк, ответ %d байт: %s", len(text), head)
+            self._save_diagnostic("search_api_empty.json",
+                                  {"payload": payload, "status": res.status, "length": len(text),
+                                   "response_head": text[:4000]})
+        return rows, text
 
     def probe_event_types(self, category: str, date_from: date, date_till: date,
                           out_dir: Optional[Path] = None) -> dict:
@@ -586,11 +597,35 @@ class EDisclosureClient:
 
     def _search_one_page(self, date_from: date, date_till: date, page: int, page_size: int,
                          event_type_ids, query, query_id, use_cache: bool) -> tuple[list[MessageRow], str]:
-        """Одна страница результатов: прямым запросом в браузерном режиме, иначе обычной отправкой формы."""
-        if self.is_browser:
-            return self.search_api(date_from, date_till, event_type_ids, page=page, page_size=page_size,
-                                   query=query, use_cache=use_cache)
-        return self.search_page(date_from, date_till, page, page_size, event_type_ids, query, query_id, use_cache)
+        """Одна страница результатов.
+
+        В браузерном режиме сначала пробуем прямой запрос (быстро). Если он не приносит строк на первой
+        странице, один раз проверяем отправкой формы: когда форма находит сообщения, а прямой запрос нет,
+        дальше работаем только формой.
+        """
+        if not self.is_browser:
+            return self.search_page(date_from, date_till, page, page_size, event_type_ids, query, query_id, use_cache)
+        if not self._force_form_search:
+            try:
+                rows, html = self.search_api(date_from, date_till, event_type_ids, page=page,
+                                             page_size=page_size, query=query, use_cache=use_cache)
+            except HttpError as e:
+                log.warning("прямой поиск недоступен (%s) -- переходим на отправку формы", e)
+                rows, html, self._force_form_search = [], "", True
+            if rows or (page > 1) or self._force_form_search is False and self._api_checked:
+                return rows, html
+            if page == 1 and not self._api_checked:
+                self._api_checked = True
+                form_rows, form_html = self.search_via_form(date_from, date_till, event_type_ids,
+                                                            query=query, page=page, page_size=page_size)
+                if form_rows:
+                    log.warning("прямой поиск ничего не находит, а форма находит -- дальше работаем формой")
+                    self._force_form_search = True
+                    return form_rows, form_html
+                return rows, html
+            return rows, html
+        return self.search_via_form(date_from, date_till, event_type_ids, query=query,
+                                    page=page, page_size=page_size)
 
     def iter_search(self, date_from: date, date_till: date, chunk_days: int = 1,
                     event_type_ids: Optional[Iterable[str]] = None, query: Optional[str] = None,
